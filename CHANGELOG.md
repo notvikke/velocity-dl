@@ -14,6 +14,17 @@ Initial public alpha preparation release.
 - Added app and extension diagnostics copy flows.
 - Added regression coverage for strategy classification and browser handoff behavior.
 
+## 0.1.0-beta.1 - 2026-04-18
+
+First public beta candidate focused on browser bridge reliability and setup clarity.
+
+- Fixed extension heartbeat ingestion so the app can correctly detect a connected browser extension from native inbox events.
+- Hardened native host setup by staging the host to a stable LocalAppData location and repairing dev-time resource fallback so cleaned workspaces do not break the app.
+- Added browser setup diagnostics that surface the detected runtime ID, installed manifest targets, and clearer connection-state messaging.
+- Staged the bundled Chromium extension into a stable app-managed folder for installed builds instead of relying on the developer workspace path.
+- Improved the browser setup assistant with explicit ID update and repair actions, clearer installed-vs-match language, and guidance about multiple unpacked extension copies.
+- Refined the extension popup and scan overlay UI so controls are cleaner and less intrusive on top of page content.
+
 ## 0.1.0-alpha.4 - 2026-04-17
 
 Dual-installer stabilization release.

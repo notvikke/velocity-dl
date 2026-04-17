@@ -1,6 +1,6 @@
-# Alpha Release Checklist
+# Release Checklist
 
-This checklist is for preparing the first public alpha build of VelocityDL.
+This checklist is for preparing a public release build of VelocityDL.
 
 ## Before Packaging
 
@@ -32,7 +32,7 @@ This checklist is for preparing the first public alpha build of VelocityDL.
 - Add a license before publishing
 - Add screenshots only if they do not reveal sensitive test material
 
-## Nice-to-Have Before Alpha
+## Nice-to-Have Before Release
 
 - Add more regression coverage for extension handoff cases
 - Add a simple changelog or release notes entry

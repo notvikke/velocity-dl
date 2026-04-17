@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeMessage {
@@ -75,6 +75,28 @@ fn default_true() -> bool {
 fn app_config_dir() -> Result<PathBuf, String> {
     let appdata = env::var("APPDATA").map_err(|e| format!("APPDATA not set: {}", e))?;
     Ok(PathBuf::from(appdata).join("com.velocitydl.desktop"))
+}
+
+fn app_alive_path(config_dir: &PathBuf) -> PathBuf {
+    config_dir.join("app_alive")
+}
+
+fn is_app_running(max_age: Duration) -> bool {
+    let Ok(config_dir) = app_config_dir() else {
+        return false;
+    };
+    let path = app_alive_path(&config_dir);
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(last_seen_ms) = raw.trim().parse::<u64>() else {
+        return false;
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    now_ms.saturating_sub(last_seen_ms) <= max_age.as_millis() as u64
 }
 
 fn write_json_response(resp: &NativeResponse) -> Result<(), String> {
@@ -178,9 +200,14 @@ fn main() -> Result<(), String> {
         };
 
         if message.action == "ping" {
+            let running = is_app_running(Duration::from_secs(12));
             write_json_response(&NativeResponse {
-                ok: true,
-                message: "pong".to_string(),
+                ok: running,
+                message: if running {
+                    "VelocityDL app is running".to_string()
+                } else {
+                    "VelocityDL app is not running".to_string()
+                },
                 accept_browser_download_requests: None,
                 browser_takeover_all_downloads: None,
                 accepted: None,
@@ -189,6 +216,16 @@ fn main() -> Result<(), String> {
         }
 
         if message.action == "get_preferences" {
+            if !is_app_running(Duration::from_secs(12)) {
+                write_json_response(&NativeResponse {
+                    ok: false,
+                    message: "VelocityDL app is not running".to_string(),
+                    accept_browser_download_requests: None,
+                    browser_takeover_all_downloads: None,
+                    accepted: Some(false),
+                })?;
+                continue;
+            }
             let prefs = load_settings_snapshot();
             write_json_response(&NativeResponse {
                 ok: true,
@@ -201,6 +238,16 @@ fn main() -> Result<(), String> {
         }
 
         if message.action == "capture" {
+            if !is_app_running(Duration::from_secs(12)) {
+                write_json_response(&NativeResponse {
+                    ok: false,
+                    message: "VelocityDL app is not running".to_string(),
+                    accept_browser_download_requests: None,
+                    browser_takeover_all_downloads: None,
+                    accepted: Some(false),
+                })?;
+                continue;
+            }
             if message
                 .url
                 .as_ref()
@@ -255,6 +302,16 @@ fn main() -> Result<(), String> {
         }
 
         if message.action == "heartbeat" {
+            if !is_app_running(Duration::from_secs(12)) {
+                write_json_response(&NativeResponse {
+                    ok: false,
+                    message: "VelocityDL app is not running".to_string(),
+                    accept_browser_download_requests: None,
+                    browser_takeover_all_downloads: None,
+                    accepted: Some(false),
+                })?;
+                continue;
+            }
             append_to_inbox(&message)?;
             write_json_response(&NativeResponse {
                 ok: true,

@@ -14,6 +14,7 @@ const RECENT_PLAYABLE_BY_TAB_WINDOW_MS = 30 * 60_000;
 const recentPlayableByTab = new Map();
 const ACTIVE_SCAN_TABS_KEY = "activeScanTabs";
 const LAST_SCAN_DEBUG_KEY = "lastScanDebug";
+const LAST_HEARTBEAT_DEBUG_KEY = "lastHeartbeatDebug";
 const pendingBrowserDownloads = new Map();
 const DOWNLOADABLE_FILE_EXT_RE =
   /\.(exe|msi|msix|msixbundle|appx|appxbundle|zip|rar|7z|tar|gz|bz2|xz|iso|img|dmg|pkg|deb|rpm|apk|ipa|jar|pdf|doc|docx|xls|xlsx|ppt|pptx|csv|json|xml|txt|rtf|epub)(?:$|[?#])/i;
@@ -481,16 +482,23 @@ async function sendCapture(payload) {
   }
 }
 
+async function setLastHeartbeatDebug(debugInfo) {
+  await chrome.storage.session.set({ [LAST_HEARTBEAT_DEBUG_KEY]: debugInfo });
+}
+
 async function pingNativeHost() {
   try {
+    console.log("[VelocityDL] pingNativeHost -> sending");
     const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
       action: "ping",
     });
+    console.log("[VelocityDL] pingNativeHost <- response", response);
     if (response?.ok === true) {
       return { ok: true, message: "connected" };
     }
     return { ok: false, message: response?.message || "native host error" };
   } catch (err) {
+    console.warn("[VelocityDL] pingNativeHost failed", err);
     return { ok: false, message: String(err?.message || err || "native host unavailable") };
   }
 }
@@ -529,6 +537,11 @@ async function applyHostPreferences(reason = "startup") {
 
 async function sendHeartbeat(reason = "background") {
   try {
+    console.log("[VelocityDL] sendHeartbeat -> sending", {
+      reason,
+      runtimeId: chrome.runtime.id,
+      version: chrome.runtime.getManifest().version || "unknown",
+    });
     const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
       action: "heartbeat",
       browser: "chromium",
@@ -537,11 +550,31 @@ async function sendHeartbeat(reason = "background") {
       source: `extension-heartbeat:${reason}`,
       sent_at_ms: Date.now(),
     });
+    console.log("[VelocityDL] sendHeartbeat <- response", response);
+    await setLastHeartbeatDebug({
+      at: Date.now(),
+      ok: response?.ok === true,
+      message: response?.message || "",
+      reason,
+      runtimeId: chrome.runtime.id,
+      extensionVersion: chrome.runtime.getManifest().version || "unknown",
+      response: response || null,
+    });
     if (response?.ok === true) {
       return { ok: true, message: "heartbeat sent" };
     }
     return { ok: false, message: response?.message || "heartbeat failed" };
   } catch (err) {
+    console.warn("[VelocityDL] sendHeartbeat failed", { reason, error: String(err?.message || err || "") });
+    await setLastHeartbeatDebug({
+      at: Date.now(),
+      ok: false,
+      message: String(err?.message || err || "heartbeat unavailable"),
+      reason,
+      runtimeId: chrome.runtime.id,
+      extensionVersion: chrome.runtime.getManifest().version || "unknown",
+      response: null,
+    });
     return { ok: false, message: String(err?.message || err || "heartbeat unavailable") };
   }
 }
@@ -640,6 +673,7 @@ async function flushPendingBrowserDownload(id) {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
+  console.log("[VelocityDL] onInstalled");
   const settings = await getSettings();
   await chrome.storage.local.set(settings);
   await applyHostPreferences("install");
@@ -649,6 +683,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   await sendHeartbeat("installed");
 });
 chrome.runtime.onStartup.addListener(async () => {
+  console.log("[VelocityDL] onStartup");
   const settings = await getSettings();
   await applyHostPreferences("startup");
   await initializeActiveScanTabs();
@@ -659,6 +694,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm?.name !== HEARTBEAT_ALARM) return;
+  console.log("[VelocityDL] alarm fired", alarm.name);
   await sendHeartbeat("alarm");
 });
 
@@ -761,14 +797,21 @@ chrome.action.onClicked.addListener(async (tab) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "vdl_popup_get_state") {
     (async () => {
+      console.log("[VelocityDL] popup requested state");
       const settings = await getSettings();
       const native = await pingNativeHost();
       const heartbeat = await sendHeartbeat("popup_state");
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const activeTab = tabs?.[0];
+      const scanActive = activeTab?.id ? await isScanActiveForTab(activeTab.id) : false;
       sendResponse({
         ok: true,
         settings,
         native,
         heartbeat,
+        scan: {
+          active: scanActive,
+        },
         runtimeId: chrome.runtime.id,
         extensionVersion: chrome.runtime.getManifest().version || "unknown",
       });
@@ -779,7 +822,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "vdl_popup_get_debug") {
     (async () => {
       const debug = (await chrome.storage.session.get(LAST_SCAN_DEBUG_KEY))?.[LAST_SCAN_DEBUG_KEY] || null;
-      sendResponse({ ok: true, debug });
+      const heartbeat = (await chrome.storage.session.get(LAST_HEARTBEAT_DEBUG_KEY))?.[LAST_HEARTBEAT_DEBUG_KEY] || null;
+      sendResponse({ ok: true, debug, heartbeat });
     })();
     return true;
   }

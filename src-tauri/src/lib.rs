@@ -1,11 +1,14 @@
 use crate::engine::manager::DownloadManager;
 use crate::extractor::clipboard::start_clipboard_polling;
-use crate::extractor::native_bridge::{start_native_inbox_polling, ExtensionHealthState};
+use crate::extractor::native_bridge::{
+    start_app_presence, start_native_inbox_polling, ExtensionHealthState, ExternalCaptureQueueState,
+};
 use crate::ipc::commands::{
     ack_external_capture_request, add_download, fetch_metadata, get_app_diagnostics,
     get_browser_integration_status, get_extension_health, get_settings, get_tooling_status,
     install_browser_integration, open_browser_extensions_page, open_extension_setup_link, open_folder,
-    pause_download, save_settings, start_sniffing, update_tool_binary,
+    pause_download, save_settings, set_external_capture_listener_ready, start_sniffing,
+    update_tool_binary,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -54,6 +57,7 @@ pub fn run() {
         .manage(DownloadManager::new())
         .manage(auth::store::AuthManager::new())
         .manage(ExtensionHealthState::default())
+        .manage(ExternalCaptureQueueState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -83,6 +87,10 @@ pub fn run() {
             let main_window = app.get_webview_window("main").unwrap();
             let _ = main_window.show();
 
+            let presence_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                start_app_presence(presence_handle).await;
+            });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -134,6 +142,7 @@ pub fn run() {
             get_tooling_status,
             get_app_diagnostics,
             ack_external_capture_request,
+            set_external_capture_listener_ready,
             save_settings,
             fetch_metadata,
             install_browser_integration,

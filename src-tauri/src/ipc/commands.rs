@@ -2,7 +2,10 @@ use crate::engine::manager::DownloadManager;
 use crate::engine::settings::AppSettings;
 use crate::extractor::{
     binaries,
-    native_bridge::{write_capture_ack, CaptureAckPayload, ExtensionHealthState},
+    native_bridge::{
+        mark_external_capture_listener_ready, write_capture_ack, CaptureAckPayload,
+        ExtensionHealthState,
+    },
     webview, ytdlp,
 };
 use crate::protocols::strategy::{classify_media_strategy, MediaStrategy};
@@ -51,6 +54,17 @@ pub struct BrowserIntegrationStatus {
     pub edge_available: bool,
     pub chrome_manifest_installed: bool,
     pub edge_manifest_installed: bool,
+    pub chrome_manifest_path: Option<String>,
+    pub edge_manifest_path: Option<String>,
+    pub chrome_manifest_extension_id: Option<String>,
+    pub edge_manifest_extension_id: Option<String>,
+    pub last_seen_runtime_id: Option<String>,
+    pub last_seen_browser: Option<String>,
+    pub last_heartbeat_at_ms: Option<u64>,
+    pub chrome_runtime_matches_manifest: bool,
+    pub edge_runtime_matches_manifest: bool,
+    pub chrome_manifest_id_readable: bool,
+    pub edge_manifest_id_readable: bool,
     pub docs_url: String,
 }
 
@@ -217,6 +231,20 @@ fn native_manifest_output_dir() -> Result<PathBuf, String> {
     Ok(appdata.join("com.velocitydl.desktop").join("native-messaging"))
 }
 
+fn native_host_install_dir() -> Result<PathBuf, String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is not available".to_string())?;
+    Ok(local_app_data.join("VelocityDL").join("native-host"))
+}
+
+fn extension_install_dir() -> Result<PathBuf, String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is not available".to_string())?;
+    Ok(local_app_data.join("VelocityDL").join("chromium-extension"))
+}
+
 fn resolve_bundled_resource<R: Runtime>(app: &AppHandle<R>, relative_path: &str) -> Option<PathBuf> {
     app.path()
         .resource_dir()
@@ -227,6 +255,9 @@ fn resolve_bundled_resource<R: Runtime>(app: &AppHandle<R>, relative_path: &str)
 
 fn resolve_extension_directory<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    if let Ok(install_dir) = extension_install_dir() {
+        candidates.push(install_dir);
+    }
     if let Some(path) = resolve_bundled_resource(app, "chromium-extension") {
         candidates.push(path);
     }
@@ -245,8 +276,57 @@ fn resolve_extension_directory<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf
         .find(|path| path.exists() && path.join("manifest.json").exists())
 }
 
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.exists() {
+        return Err(format!("Source directory '{}' does not exist", source.display()));
+    }
+    std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::copy(&source_path, &destination_path).map_err(|e| {
+                format!(
+                    "Failed to copy '{}' to '{}': {}",
+                    source_path.display(),
+                    destination_path.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn stage_extension_directory<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let source = resolve_bundled_resource(app, "chromium-extension")
+        .or_else(|| {
+            let current = std::env::current_dir().ok()?;
+            let candidate = current.join("chromium-extension");
+            (candidate.exists() && candidate.join("manifest.json").exists()).then_some(candidate)
+        })
+        .ok_or_else(|| "VelocityDL Chromium extension files were not found in this build".to_string())?;
+
+    let destination = extension_install_dir()?;
+    if source != destination {
+        copy_dir_recursive(&source, &destination)?;
+    }
+    Ok(destination)
+}
+
 fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    if let Ok(install_dir) = native_host_install_dir() {
+        candidates.push(install_dir.join("vdl_native_host.exe"));
+    }
     if let Some(path) = resolve_bundled_resource(app, "native-host/vdl_native_host.exe") {
         candidates.push(path);
     }
@@ -254,13 +334,95 @@ fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<Path
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("resources").join("native-host").join("vdl_native_host.exe"));
             candidates.push(parent.join("vdl_native_host.exe"));
+            candidates.push(parent.join("native-host").join("vdl_native_host.exe"));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("src-tauri").join("target").join("release").join("vdl_native_host.exe"));
+        candidates.push(
+            cwd.join("src-tauri")
+                .join("target")
+                .join("release")
+                .join("native-host")
+                .join("vdl_native_host.exe"),
+        );
+        candidates.push(cwd.join("src-tauri").join("target").join("debug").join("vdl_native_host.exe"));
+        candidates.push(
+            cwd.join("src-tauri")
+                .join("target")
+                .join("debug")
+                .join("native-host")
+                .join("vdl_native_host.exe"),
+        );
     }
 
     candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(windows)]
+fn stage_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let source = resolve_native_host_executable(app)
+        .ok_or_else(|| "VelocityDL native host binary was not found in this build".to_string())?;
+    let install_dir = native_host_install_dir()?;
+    std::fs::create_dir_all(&install_dir).map_err(|e| e.to_string())?;
+    let staged = install_dir.join("vdl_native_host.exe");
+    std::fs::copy(&source, &staged).map_err(|e| {
+        format!(
+            "Failed to stage native host from '{}' to '{}': {}",
+            source.display(),
+            staged.display(),
+            e
+        )
+    })?;
+    Ok(staged)
+}
+
+#[cfg(windows)]
+fn registry_default_value(registry_key: &str) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("reg")
+        .args(["query", registry_key, "/ve"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(|line| {
+        if line.contains("REG_SZ") {
+            line.split_once("REG_SZ")
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(windows)]
+fn manifest_registered_at(registry_key: &str, manifest_path: &Path) -> bool {
+    registry_default_value(registry_key)
+        .map(|value| PathBuf::from(value) == manifest_path)
+        .unwrap_or(false)
+}
+
+fn manifest_extension_id(manifest_path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(manifest_path).ok()?;
+    let normalized = raw.trim_start_matches('\u{feff}');
+    let parsed = serde_json::from_str::<serde_json::Value>(normalized).ok()?;
+    parsed
+        .get("allowed_origins")
+        .and_then(|v| v.as_array())
+        .and_then(|origins| origins.first())
+        .and_then(|origin| origin.as_str())
+        .and_then(|origin| {
+            let prefix = "chrome-extension://";
+            origin
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix('/'))
+                .map(|s| s.to_string())
+        })
 }
 
 #[cfg(windows)]
@@ -722,10 +884,44 @@ pub async fn get_extension_health<R: Runtime>(
 #[tauri::command]
 pub async fn get_browser_integration_status<R: Runtime>(
     app: AppHandle<R>,
+    health: State<'_, ExtensionHealthState>,
 ) -> Result<BrowserIntegrationStatus, String> {
     let manifest_dir = native_manifest_output_dir()?;
     let chrome_manifest = manifest_dir.join("com.velocitydl.native_host.chrome.json");
     let edge_manifest = manifest_dir.join("com.velocitydl.native_host.edge.json");
+    let chrome_manifest_id = manifest_extension_id(&chrome_manifest);
+    let edge_manifest_id = manifest_extension_id(&edge_manifest);
+    let chrome_manifest_id_readable = chrome_manifest_id.is_some();
+    let edge_manifest_id_readable = edge_manifest_id.is_some();
+    let health_snapshot = health.snapshot().await;
+    let last_runtime_id = health_snapshot.last_seen_runtime_id.clone();
+    let last_browser = health_snapshot.last_seen_browser.clone();
+    let chrome_runtime_matches_manifest = last_browser
+        .as_deref()
+        .map(|browser| browser.eq_ignore_ascii_case("chromium") || browser.eq_ignore_ascii_case("chrome"))
+        .unwrap_or(false)
+        && last_runtime_id.is_some()
+        && last_runtime_id == chrome_manifest_id;
+    let edge_runtime_matches_manifest = last_browser
+        .as_deref()
+        .map(|browser| browser.eq_ignore_ascii_case("edge"))
+        .unwrap_or(false)
+        && last_runtime_id.is_some()
+        && last_runtime_id == edge_manifest_id;
+    #[cfg(windows)]
+    let chrome_registered = manifest_registered_at(
+        r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host",
+        &chrome_manifest,
+    );
+    #[cfg(not(windows))]
+    let chrome_registered = false;
+    #[cfg(windows)]
+    let edge_registered = manifest_registered_at(
+        r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host",
+        &edge_manifest,
+    );
+    #[cfg(not(windows))]
+    let edge_registered = false;
 
     Ok(BrowserIntegrationStatus {
         extension_directory: resolve_extension_directory(&app)
@@ -734,8 +930,19 @@ pub async fn get_browser_integration_status<R: Runtime>(
             .map(|path| path.to_string_lossy().to_string()),
         chrome_available: find_browser_executable("chrome").is_some(),
         edge_available: find_browser_executable("edge").is_some(),
-        chrome_manifest_installed: chrome_manifest.exists(),
-        edge_manifest_installed: edge_manifest.exists(),
+        chrome_manifest_installed: chrome_manifest.exists() && chrome_registered,
+        edge_manifest_installed: edge_manifest.exists() && edge_registered,
+        chrome_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
+        edge_manifest_path: edge_manifest.exists().then(|| edge_manifest.to_string_lossy().to_string()),
+        chrome_manifest_extension_id: chrome_manifest_id,
+        edge_manifest_extension_id: edge_manifest_id,
+        last_seen_runtime_id: last_runtime_id,
+        last_seen_browser: last_browser,
+        last_heartbeat_at_ms: health_snapshot.last_heartbeat_at_ms,
+        chrome_runtime_matches_manifest,
+        edge_runtime_matches_manifest,
+        chrome_manifest_id_readable,
+        edge_manifest_id_readable,
         docs_url: "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md"
             .to_string(),
     })
@@ -814,8 +1021,8 @@ pub async fn install_browser_integration<R: Runtime>(
 ) -> Result<BrowserIntegrationInstallResult, String> {
     #[cfg(windows)]
     {
-        let host_path = resolve_native_host_executable(&app)
-            .ok_or_else(|| "VelocityDL native host binary was not found in this build".to_string())?;
+        let host_path = stage_native_host_executable(&app)?;
+        let _ = stage_extension_directory(&app)?;
 
         let chrome_id = match chrome_extension_id {
             Some(value) if !value.trim().is_empty() => Some(validate_extension_id(&value)?),
@@ -904,6 +1111,13 @@ pub async fn ack_external_capture_request<R: Runtime>(
         },
     )
     .await
+}
+
+#[tauri::command]
+pub async fn set_external_capture_listener_ready<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    mark_external_capture_listener_ready(&app).await
 }
 
 #[tauri::command]

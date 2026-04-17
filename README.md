@@ -9,9 +9,9 @@ It is designed for mixed download workflows:
 - browser handoff from a companion extension
 - in-app capture and troubleshooting tools for difficult pages
 
-## Alpha Status
+## Beta Status
 
-This project is currently being prepared for an early alpha release.
+This project is currently being prepared for its first public beta release.
 
 That means:
 
@@ -30,7 +30,7 @@ That means:
 
 ## Release Variants
 
-Windows alpha builds now ship in two variants:
+ Windows beta builds ship in two variants:
 
 - Slim installer:
   - smaller download than the full package
@@ -104,7 +104,7 @@ npm run strategy:test
 
 ## First-Run Setup
 
-The app includes a first-run setup flow for alpha builds. It lets the user choose initial preferences such as:
+The app includes a first-run setup flow for beta builds. It lets the user choose initial preferences such as:
 
 - default download folder
 - browser capture acceptance
@@ -119,7 +119,7 @@ Public-facing documentation in this repository is intentionally generic. Operati
 
 ## Release Notes
 
-See [docs/alpha-release-checklist.md](/D:/Dev%202026/Tools/VelocityDL/docs/alpha-release-checklist.md) for the current alpha hardening and packaging checklist.
+See [docs/alpha-release-checklist.md](/D:/Dev%202026/Tools/VelocityDL/docs/alpha-release-checklist.md) for the current release hardening and packaging checklist.
 
 ## License
 
@@ -129,16 +129,16 @@ This repository is available under the [MIT License](/D:/Dev%202026/Tools/Veloci
 
 Before posting copied diagnostics publicly, review the guidance in [docs/diagnostics-privacy.md](/D:/Dev%202026/Tools/VelocityDL/docs/diagnostics-privacy.md).
 
-For public alpha tracking, use the GitHub issue templates for:
+For public beta tracking, use the GitHub issue templates for:
 
 - app bugs
 - Windows installer problems
 
-Known alpha bugs worth reporting with diagnostics:
+Known beta-stage bugs worth reporting with diagnostics:
 
 - browser extension handoff does not reach the desktop app
 - installer succeeds but app fails to open on a clean Windows PC
 - bundled or updated tool status looks wrong in Settings
 - browser capture works in one release track but not the other
 
-See [CHANGELOG.md](/D:/Dev%202026/Tools/VelocityDL/CHANGELOG.md) for the current alpha release summary.
+See [CHANGELOG.md](/D:/Dev%202026/Tools/VelocityDL/CHANGELOG.md) for the current beta release summary.

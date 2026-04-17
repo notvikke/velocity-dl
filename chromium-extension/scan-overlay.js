@@ -125,8 +125,8 @@
     el.textContent = text;
     Object.assign(el.style, {
       position: "fixed",
-      top: "16px",
-      right: "16px",
+      bottom: "18px",
+      right: "18px",
       zIndex: "2147483647",
       background: "rgba(16,16,16,0.92)",
       color: "#fff",
@@ -168,8 +168,8 @@
       }
 
       btn.style.display = "inline-flex";
-      const top = Math.max(8, rect.top + 8);
-      const left = Math.max(8, rect.right - 36);
+      const top = Math.max(10, rect.top + 10);
+      const left = Math.max(10, rect.right - 40);
       btn.style.top = `${top}px`;
       btn.style.left = `${left}px`;
     }
@@ -215,11 +215,11 @@
     btn.appendChild(logo);
     Object.assign(btn.style, {
       position: "fixed",
-      width: "28px",
-      height: "28px",
+      width: "30px",
+      height: "30px",
       borderRadius: "999px",
       border: "1px solid rgba(255,255,255,0.35)",
-      background: "rgba(0,0,0,0.75)",
+      background: "rgba(9,13,22,0.78)",
       color: "#fff",
       fontSize: "11px",
       fontWeight: "700",
@@ -230,16 +230,22 @@
       justifyContent: "center",
       padding: "0",
       lineHeight: "0",
-      boxShadow: "0 4px 14px rgba(0,0,0,0.35)",
-      backdropFilter: "blur(2px)",
+      boxShadow: "0 8px 20px rgba(0,0,0,0.30)",
+      backdropFilter: "blur(4px)",
       overflow: "hidden",
+      opacity: "0.82",
+      transition: "background 120ms ease, opacity 120ms ease, transform 120ms ease",
     });
 
     btn.addEventListener("mouseenter", () => {
-      btn.style.background = "rgba(0,0,0,0.9)";
+      btn.style.background = "rgba(13,19,31,0.96)";
+      btn.style.opacity = "1";
+      btn.style.transform = "scale(1.04)";
     });
     btn.addEventListener("mouseleave", () => {
-      btn.style.background = "rgba(0,0,0,0.75)";
+      btn.style.background = "rgba(9,13,22,0.78)";
+      btn.style.opacity = "0.82";
+      btn.style.transform = "scale(1)";
     });
 
     btn.addEventListener("click", (e) => {
@@ -285,35 +291,41 @@
     const btn = document.createElement("button");
     btn.className = PAGE_BTN_CLASS;
     btn.type = "button";
-    btn.textContent = "Capture Page Video";
+    btn.textContent = "Capture";
     btn.title = "Capture the currently playing media from this page";
     Object.assign(btn.style, {
       position: "fixed",
-      top: "16px",
-      right: "16px",
+      right: "14px",
+      bottom: "84px",
       zIndex: "2147483646",
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
-      gap: "6px",
       borderRadius: "999px",
       border: "1px solid rgba(255,255,255,0.28)",
-      background: "rgba(0,0,0,0.78)",
+      background: "rgba(10,14,24,0.84)",
       color: "#fff",
-      padding: "8px 12px",
-      fontSize: "12px",
+      padding: "10px 12px",
+      minWidth: "74px",
+      fontSize: "11px",
       fontWeight: "600",
       fontFamily: "Segoe UI, Arial, sans-serif",
       cursor: "pointer",
-      boxShadow: "0 6px 18px rgba(0,0,0,0.32)",
-      backdropFilter: "blur(2px)",
+      boxShadow: "0 10px 28px rgba(0,0,0,0.26)",
+      backdropFilter: "blur(6px)",
+      opacity: "0.58",
+      transition: "opacity 120ms ease, transform 120ms ease, background 120ms ease",
     });
 
     btn.addEventListener("mouseenter", () => {
-      btn.style.background = "rgba(0,0,0,0.9)";
+      btn.style.background = "rgba(16,23,38,0.96)";
+      btn.style.opacity = "0.96";
+      btn.style.transform = "translateX(-2px)";
     });
     btn.addEventListener("mouseleave", () => {
-      btn.style.background = "rgba(0,0,0,0.78)";
+      btn.style.background = "rgba(10,14,24,0.84)";
+      btn.style.opacity = "0.58";
+      btn.style.transform = "translateX(0)";
     });
 
     btn.addEventListener("click", (e) => {
@@ -359,7 +371,7 @@
     });
     ensurePageCaptureButton();
     if (STATE.pageButton) {
-      STATE.pageButton.style.opacity = mediaNodes.length ? "0.72" : "1";
+      STATE.pageButton.style.opacity = mediaNodes.length ? "0.46" : "0.72";
     }
     schedulePositionUpdate();
   }

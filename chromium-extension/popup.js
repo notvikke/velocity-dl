@@ -1,6 +1,9 @@
 const takeoverToggle = document.getElementById("takeoverToggle");
 const menuToggle = document.getElementById("menuToggle");
 const scanPickerToggle = document.getElementById("scanPickerToggle");
+const takeoverState = document.getElementById("takeoverState");
+const menuState = document.getElementById("menuState");
+const scanPickerState = document.getElementById("scanPickerState");
 const scanBtn = document.getElementById("scanBtn");
 const copyDebugBtn = document.getElementById("copyDebugBtn");
 const nativeState = document.getElementById("nativeState");
@@ -14,11 +17,30 @@ const state = {
   takeoverAllDownloads: true,
   showContextMenu: true,
   autoOpenQualityPickerOnScanCapture: true,
+  scanActive: false,
 };
 
-function setToggle(btn, enabled) {
+function setToggle(btn, enabled, labelEl) {
   btn.classList.toggle("on", !!enabled);
   btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+  if (labelEl) {
+    labelEl.textContent = enabled ? "On" : "Off";
+    labelEl.style.color = enabled ? "#20c47a" : "#8f9cb0";
+  }
+}
+
+function setScanButton(active) {
+  state.scanActive = !!active;
+  scanBtn.classList.toggle("on", !!active);
+  scanBtn.classList.toggle("off", !active);
+  scanBtn.textContent = active ? "Scan Overlay On" : "Scan Overlay Off";
+  const meta = document.createElement("span");
+  meta.className = "btn-meta";
+  meta.id = "scanBtnMeta";
+  meta.textContent = active
+    ? "Disable floating capture controls on the current tab"
+    : "Enable capture controls on the current tab";
+  scanBtn.appendChild(meta);
 }
 
 function setStatus(text, kind = "") {
@@ -62,9 +84,23 @@ async function buildDiagnosticsText() {
     `runtimeId: ${stateResp?.runtimeId || "unknown"}`,
     `nativeConnected: ${stateResp?.native?.ok ? "yes" : "no"}`,
     `nativeMessage: ${stateResp?.native?.message || ""}`,
+    `heartbeatOk: ${stateResp?.heartbeat?.ok ? "yes" : "no"}`,
+    `heartbeatMessage: ${stateResp?.heartbeat?.message || ""}`,
     `takeoverAllDownloads: ${!!state.takeoverAllDownloads}`,
     `showContextMenu: ${!!state.showContextMenu}`,
     `autoOpenQualityPickerOnScanCapture: ${!!state.autoOpenQualityPickerOnScanCapture}`,
+    "",
+    "lastHeartbeat:",
+    debugResp?.heartbeat
+      ? [
+          `at: ${new Date(debugResp.heartbeat.at).toISOString()}`,
+          `ok: ${debugResp.heartbeat.ok ? "yes" : "no"}`,
+          `message: ${debugResp.heartbeat.message || ""}`,
+          `reason: ${debugResp.heartbeat.reason || ""}`,
+          `runtimeId: ${debugResp.heartbeat.runtimeId || ""}`,
+          `extensionVersion: ${debugResp.heartbeat.extensionVersion || ""}`,
+        ].join("\n")
+      : "(none)",
     "",
     "lastScanDebug:",
     debugResp?.debug
@@ -100,16 +136,18 @@ async function loadState() {
   state.showContextMenu = !!resp.settings?.showContextMenu;
   state.autoOpenQualityPickerOnScanCapture =
     resp.settings?.autoOpenQualityPickerOnScanCapture !== false;
-  setToggle(takeoverToggle, state.takeoverAllDownloads);
-  setToggle(menuToggle, state.showContextMenu);
-  setToggle(scanPickerToggle, state.autoOpenQualityPickerOnScanCapture);
+  state.scanActive = !!resp.scan?.active;
+  setToggle(takeoverToggle, state.takeoverAllDownloads, takeoverState);
+  setToggle(menuToggle, state.showContextMenu, menuState);
+  setToggle(scanPickerToggle, state.autoOpenQualityPickerOnScanCapture, scanPickerState);
+  setScanButton(state.scanActive);
   runtimeId.textContent = `ID: ${resp.runtimeId || "unknown"}`;
 
   if (resp.native?.ok) {
-    nativeState.textContent = "Native host connected";
+    nativeState.textContent = "VelocityDL app detected";
     nativeState.className = "sub ok";
   } else {
-    nativeState.textContent = `Native host unavailable: ${resp.native?.message || "unknown error"}`;
+    nativeState.textContent = `VelocityDL app unavailable: ${resp.native?.message || "unknown error"}`;
     nativeState.className = "sub warn";
   }
 
@@ -159,7 +197,8 @@ scanBtn.addEventListener("click", async () => {
     setStatus(resp?.message || "Scan toggle failed", "warn");
     return;
   }
-  setStatus("Scan toggled on current tab", "ok");
+  setScanButton(!!resp.active);
+  setStatus(resp.active ? "Scan overlay enabled" : "Scan overlay disabled", "ok");
   await loadState();
 });
 

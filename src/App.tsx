@@ -704,6 +704,7 @@ function App() {
         };
       });
     });
+    invoke("set_external_capture_listener_ready").catch(console.error);
 
     return () => {
       unlistenMedia.then(f => f());
@@ -908,21 +909,6 @@ function App() {
     setExtensionStatusMessage(label);
     window.setTimeout(() => setExtensionStatusMessage(""), 2200);
   }, [refreshExtensionHealth]);
-
-  const extensionMetaLabel = useMemo(() => {
-    if (!extensionHealth) return "Checking extension...";
-    const details = [
-      extensionHealth.last_seen_browser,
-      extensionHealth.last_seen_extension_version
-        ? `v${extensionHealth.last_seen_extension_version}`
-        : null,
-    ].filter(Boolean);
-    if (extensionHealth.last_heartbeat_at_ms) {
-      const when = new Date(extensionHealth.last_heartbeat_at_ms).toLocaleTimeString();
-      details.push(`seen ${when}`);
-    }
-    return details.length ? details.join(" | ") : "Recommended for better capture reliability";
-  }, [extensionHealth]);
 
   const filteredDownloads = useMemo(() => {
     const normalizedSearch = deferredSearchTerm;
@@ -1155,27 +1141,27 @@ function App() {
         </div>
 
         {/* Status Bar */}
-        <div className="h-6 border-t border-border bg-surface px-3 flex items-center justify-between text-[11px] text-gray-500">
+        <div className="h-6 border-t border-border bg-surface px-3 flex items-center justify-between gap-3 overflow-hidden text-[11px] text-gray-500">
           <div className="flex gap-4">
              <span>Total Speed: {formatAggregateSpeed(downloadStats.totalSpeedBytes)}</span>
              <span>Active: {downloadStats.runningCount}</span>
              <span>Threads: {maxThreads}</span>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex min-w-0 items-center gap-2 truncate">
               <Puzzle size={12} className="text-gray-400" />
-              <span>{extensionHealth?.status_label || "Checking extension..."}</span>
+              <span className="truncate">{extensionHealth?.status_label || "Checking extension..."}</span>
+              <button
+                onClick={() => handleOpenExtensionLink("install")}
+                className="rounded-full bg-accent/12 px-2 py-0.5 text-accent hover:bg-accent/18 hover:text-accent transition-colors"
+              >
+                Setup
+              </button>
               <button
                 onClick={handleCheckExtension}
                 className="text-gray-400 hover:text-white transition-colors"
               >
                 Check
-              </button>
-              <button
-                onClick={() => handleOpenExtensionLink("install")}
-                className="text-accent hover:text-accent/80 transition-colors"
-              >
-                Install
               </button>
               <button
                 onClick={() => handleOpenExtensionLink("setup")}
@@ -1184,9 +1170,8 @@ function App() {
                 Docs
               </button>
             </div>
-            <div className="hidden text-gray-600 md:block">{extensionMetaLabel}</div>
-            {extensionStatusMessage && <div className="text-gray-400">{extensionStatusMessage}</div>}
-            <div>VelocityDL v0.1.0-alpha.4</div>
+            {extensionStatusMessage && <div className="truncate text-gray-400">{extensionStatusMessage}</div>}
+            <div className="shrink-0">v0.1.0-beta.1</div>
           </div>
         </div>
       </div>

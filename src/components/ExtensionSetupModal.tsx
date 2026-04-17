@@ -10,6 +10,17 @@ interface BrowserIntegrationStatus {
   edge_available: boolean;
   chrome_manifest_installed: boolean;
   edge_manifest_installed: boolean;
+  chrome_manifest_path?: string;
+  edge_manifest_path?: string;
+  chrome_manifest_extension_id?: string;
+  edge_manifest_extension_id?: string;
+  last_seen_runtime_id?: string;
+  last_seen_browser?: string;
+  last_heartbeat_at_ms?: number;
+  chrome_runtime_matches_manifest: boolean;
+  edge_runtime_matches_manifest: boolean;
+  chrome_manifest_id_readable: boolean;
+  edge_manifest_id_readable: boolean;
   docs_url: string;
 }
 
@@ -122,14 +133,29 @@ export function ExtensionSetupModal({
   };
 
   const installIntegration = async () => {
+    const trimmedChromeId = chromeId.trim();
+    const trimmedEdgeId = edgeId.trim();
+    return installOrRepairIntegration({
+      chromeExtensionId: trimmedChromeId || null,
+      edgeExtensionId: trimmedEdgeId || null,
+    });
+  };
+
+  const installOrRepairIntegration = async ({
+    chromeExtensionId,
+    edgeExtensionId,
+  }: {
+    chromeExtensionId: string | null;
+    edgeExtensionId: string | null;
+  }) => {
     setBusy(true);
     saveIdsLocally();
     try {
       const result = await invoke<BrowserIntegrationInstallResult>(
         "install_browser_integration",
         {
-          chromeExtensionId: chromeId.trim() || null,
-          edgeExtensionId: edgeId.trim() || null,
+          chromeExtensionId,
+          edgeExtensionId,
         }
       );
       setMessage(result.message);
@@ -147,6 +173,34 @@ export function ExtensionSetupModal({
     }
   };
 
+  const repairIntegration = async () => {
+    const trimmedChromeId = chromeId.trim();
+    const trimmedEdgeId = edgeId.trim();
+    const fallbackChromeId =
+      trimmedChromeId ||
+      status?.chrome_manifest_extension_id ||
+      (
+        (status?.last_seen_browser || "").toLowerCase().includes("chrom") &&
+        status?.last_seen_runtime_id
+          ? status.last_seen_runtime_id
+          : ""
+      );
+    const fallbackEdgeId =
+      trimmedEdgeId ||
+      status?.edge_manifest_extension_id ||
+      (
+        (status?.last_seen_browser || "").toLowerCase().includes("edge") &&
+        status?.last_seen_runtime_id
+          ? status.last_seen_runtime_id
+          : ""
+      );
+
+    await installOrRepairIntegration({
+      chromeExtensionId: fallbackChromeId || null,
+      edgeExtensionId: fallbackEdgeId || null,
+    });
+  };
+
   const installStateLabel = useMemo(() => {
     if (!status) return "Checking bundled browser integration files...";
     if (!status.native_host_path) {
@@ -157,6 +211,87 @@ export function ExtensionSetupModal({
     }
     return "Use the steps below once per browser profile.";
   }, [status]);
+
+  const activeBrowser = useMemo(() => {
+    const browser = (status?.last_seen_browser || "").toLowerCase();
+    if (browser.includes("edge")) return "edge";
+    if (browser.includes("chrome") || browser.includes("chromium")) return "chrome";
+    return null;
+  }, [status?.last_seen_browser]);
+
+  const runtimeMatchLabel = useMemo(() => {
+    if (!status?.last_seen_runtime_id) {
+      return "No extension heartbeat detected by the app yet.";
+    }
+    if (
+      activeBrowser === "chrome" &&
+      status.chrome_manifest_installed &&
+      !status.chrome_manifest_id_readable
+    ) {
+      return "Chrome is connected, but the setup screen could not read the target ID back from the installed manifest.";
+    }
+    if (
+      activeBrowser === "edge" &&
+      status.edge_manifest_installed &&
+      !status.edge_manifest_id_readable
+    ) {
+      return "Edge is connected, but the setup screen could not read the target ID back from the installed manifest.";
+    }
+    if (
+      (activeBrowser === "chrome" && status.chrome_runtime_matches_manifest) ||
+      (activeBrowser === "edge" && status.edge_runtime_matches_manifest)
+    ) {
+      return "The app heartbeat and installed browser manifest point to the same extension.";
+    }
+    return "The app detected an extension runtime ID that does not match the installed browser manifest.";
+  }, [activeBrowser, status]);
+
+  const connectionBadge = useMemo(() => {
+    if (!status?.last_seen_runtime_id) {
+      return {
+        text: "Waiting",
+        className: "rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium text-gray-300",
+      };
+    }
+    if (
+      activeBrowser === "chrome" &&
+      status.chrome_manifest_installed &&
+      !status.chrome_manifest_id_readable
+    ) {
+      return {
+        text: "ID Unknown",
+        className: "rounded-full bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300",
+      };
+    }
+    if (
+      activeBrowser === "edge" &&
+      status.edge_manifest_installed &&
+      !status.edge_manifest_id_readable
+    ) {
+      return {
+        text: "ID Unknown",
+        className: "rounded-full bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300",
+      };
+    }
+    if (
+      (activeBrowser === "chrome" && status.chrome_runtime_matches_manifest) ||
+      (activeBrowser === "edge" && status.edge_runtime_matches_manifest)
+    ) {
+      return {
+        text: "IDs Match",
+        className: "rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300",
+      };
+    }
+    return {
+      text: "Check IDs",
+      className: "rounded-full bg-amber-500/10 px-2 py-1 text-[11px] font-medium text-amber-300",
+    };
+  }, [activeBrowser, status]);
+
+  const heartbeatTimeLabel = useMemo(() => {
+    if (!status?.last_heartbeat_at_ms) return "Not seen yet";
+    return new Date(status.last_heartbeat_at_ms).toLocaleString();
+  }, [status?.last_heartbeat_at_ms]);
 
   return (
     <AnimatePresence>
@@ -193,9 +328,81 @@ export function ExtensionSetupModal({
             <div className="grid gap-6 overflow-y-auto px-6 py-5 md:grid-cols-[1.2fr_0.8fr]">
               <div className="space-y-5">
                 <section className="rounded-xl border border-border bg-background/40 p-4">
+                  <div className="mb-2 text-sm font-semibold text-gray-100">Connection Check</div>
+                  <div className="mb-4 text-xs text-gray-500">
+                    Match the extension ID shown in your browser with the ID stored in the installed native messaging manifest.
+                  </div>
+                  <div className="mb-4 rounded-lg border border-border/70 bg-black/10 px-3 py-2 text-[11px] text-gray-400">
+                    VelocityDL matches by extension ID, not by the folder path Chrome loaded. If multiple unpacked copies are enabled, Chrome may keep using the older one until you disable it.
+                  </div>
+                  <div className="rounded-xl border border-border/70 bg-black/10 p-3">
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-medium text-gray-200">Current app detection</div>
+                        <div className="mt-1 text-[11px] text-gray-500">
+                          Last heartbeat: {heartbeatTimeLabel}
+                        </div>
+                      </div>
+                      <span
+                        className={connectionBadge.className}
+                      >
+                        {connectionBadge.text}
+                      </span>
+                    </div>
+                    <div className="grid gap-3">
+                      <IdRow
+                        label="Detected by app"
+                        value={status?.last_seen_runtime_id}
+                        hint={status?.last_seen_browser ? `Browser: ${status.last_seen_browser}` : "No heartbeat detected yet"}
+                        status={status?.last_seen_runtime_id ? "unknown" : "missing"}
+                      />
+                      <IdRow
+                        label="Chrome manifest target"
+                        value={status?.chrome_manifest_extension_id}
+                        hint={status?.chrome_manifest_path || "Chrome manifest not installed yet"}
+                        status={
+                          !status?.chrome_manifest_installed
+                            ? "missing"
+                            : !status.chrome_manifest_id_readable
+                              ? "unknown"
+                              : status.chrome_runtime_matches_manifest
+                                ? "match"
+                                : "different"
+                        }
+                      />
+                      <IdRow
+                        label="Edge manifest target"
+                        value={status?.edge_manifest_extension_id}
+                        hint={status?.edge_manifest_path || "Edge manifest not installed yet"}
+                        status={
+                          !status?.edge_manifest_installed
+                            ? "missing"
+                            : !status.edge_manifest_id_readable
+                              ? "unknown"
+                              : status.edge_runtime_matches_manifest
+                                ? "match"
+                                : "different"
+                        }
+                      />
+                    </div>
+                    <div className="mt-3 text-[11px] text-gray-400">{runtimeMatchLabel}</div>
+                  </div>
+                </section>
+
+                <section className="rounded-xl border border-border bg-background/40 p-4">
                   <div className="mb-2 text-sm font-semibold text-gray-100">Step 1</div>
                   <div className="mb-3 text-xs text-gray-500">
-                    Open your browser&apos;s extensions page, enable Developer mode, then load the unpacked extension folder.
+                    Open your browser&apos;s extensions page, enable Developer mode, then load the unpacked extension folder shown below.
+                  </div>
+                  <div className="mb-3 rounded-lg border border-border/70 bg-black/10 px-3 py-2 text-[11px] text-gray-400">
+                    <div className="mb-1 font-medium text-gray-200">Folder to load</div>
+                    <div className="break-all">{status?.extension_directory || "Bundled extension folder not found"}</div>
+                  </div>
+                  <div className="mb-3 text-[11px] text-gray-500">
+                    Production builds use a stable app-managed folder. Development runs may still show a workspace path until the bridge is installed or repaired once.
+                  </div>
+                  <div className="mb-3 text-[11px] text-gray-500">
+                    For installed builds, disable older unpacked copies in Chrome before testing this folder, otherwise Chrome can keep sending heartbeats from the older enabled extension.
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -230,7 +437,7 @@ export function ExtensionSetupModal({
                 <section className="rounded-xl border border-border bg-background/40 p-4">
                   <div className="mb-2 text-sm font-semibold text-gray-100">Step 2</div>
                   <div className="mb-4 text-xs text-gray-500">
-                    Copy the extension ID shown on the extensions page and paste it here. Chrome and Edge IDs can be different.
+                    Copy the extension ID shown on the extensions page and paste it here. Use Update IDs to rewrite the browser manifest for the extension you actually loaded.
                   </div>
                   <div className="space-y-3">
                     <label className="block">
@@ -252,20 +459,33 @@ export function ExtensionSetupModal({
                       />
                     </label>
                   </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={installIntegration}
+                      disabled={busy || (!chromeId.trim() && !edgeId.trim())}
+                      className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-gray-500"
+                    >
+                      {busy ? "Working..." : "Update Browser IDs"}
+                    </button>
+                    <div className="self-center text-[11px] text-gray-500">
+                      This updates the native messaging manifest to the IDs entered above.
+                    </div>
+                  </div>
                 </section>
 
                 <section className="rounded-xl border border-border bg-background/40 p-4">
                   <div className="mb-2 text-sm font-semibold text-gray-100">Step 3</div>
                   <div className="mb-3 text-xs text-gray-500">
-                    Install the native bridge so the browser extension can hand downloads to VelocityDL without using PowerShell.
+                    Install or repair the native bridge files. If the fields above are blank, this will reuse the detected runtime ID or existing manifest IDs when possible.
                   </div>
                   <button
                     type="button"
-                    onClick={installIntegration}
+                    onClick={repairIntegration}
                     disabled={busy || !status?.native_host_path || !status?.extension_directory}
                     className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-gray-500"
                   >
-                    {busy ? "Installing..." : "Install Native Browser Integration"}
+                    {busy ? "Working..." : "Install or Repair Browser Bridge"}
                   </button>
                 </section>
               </div>
@@ -280,22 +500,34 @@ export function ExtensionSetupModal({
                     <StatusLine
                       label="Bundled extension files"
                       ok={!!status?.extension_directory}
+                      okLabel="Installed"
                       detail={status?.extension_directory || "Not found in this build"}
                     />
                     <StatusLine
                       label="Native host binary"
                       ok={!!status?.native_host_path}
+                      okLabel="Installed"
                       detail={status?.native_host_path || "Not found in this build"}
                     />
                     <StatusLine
                       label="Chrome manifest"
                       ok={!!status?.chrome_manifest_installed}
-                      detail={status?.chrome_manifest_installed ? "Installed" : "Not installed yet"}
+                      okLabel="Installed"
+                      detail={
+                        status?.chrome_manifest_installed
+                          ? `Installed${status.chrome_manifest_extension_id ? ` for ${status.chrome_manifest_extension_id}` : ""}`
+                          : "Not installed yet"
+                      }
                     />
                     <StatusLine
                       label="Edge manifest"
                       ok={!!status?.edge_manifest_installed}
-                      detail={status?.edge_manifest_installed ? "Installed" : "Not installed yet"}
+                      okLabel="Installed"
+                      detail={
+                        status?.edge_manifest_installed
+                          ? `Installed${status.edge_manifest_extension_id ? ` for ${status.edge_manifest_extension_id}` : ""}`
+                          : "Not installed yet"
+                      }
                     />
                   </div>
                 </section>
@@ -331,16 +563,59 @@ export function ExtensionSetupModal({
   );
 }
 
-function StatusLine({ label, ok, detail }: { label: string; ok: boolean; detail: string }) {
+function StatusLine({
+  label,
+  ok,
+  detail,
+  okLabel = "Ready",
+}: {
+  label: string;
+  ok: boolean;
+  detail: string;
+  okLabel?: string;
+}) {
   return (
     <div className="rounded-lg border border-border/70 bg-black/10 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <span className="text-gray-300">{label}</span>
         <span className={ok ? "text-emerald-400" : "text-amber-300"}>
-          {ok ? "Ready" : "Missing"}
+          {ok ? okLabel : "Missing"}
         </span>
       </div>
       <div className="mt-1 break-all text-[11px] text-gray-500">{detail}</div>
+    </div>
+  );
+}
+
+function IdRow({
+  label,
+  value,
+  hint,
+  status,
+}: {
+  label: string;
+  value?: string;
+  hint: string;
+  status: "match" | "different" | "unknown" | "missing";
+}) {
+  const badge =
+    status === "match"
+      ? { text: "Match", className: "text-[11px] text-emerald-300" }
+      : status === "different"
+        ? { text: "Different", className: "text-[11px] text-amber-300" }
+        : status === "unknown"
+          ? { text: "Unknown", className: "text-[11px] text-sky-300" }
+          : { text: "Missing", className: "text-[11px] text-gray-400" };
+  return (
+    <div className="rounded-lg border border-border/70 bg-background/50 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <div className="text-[11px] font-medium text-gray-300">{label}</div>
+        <span className={badge.className}>{badge.text}</span>
+      </div>
+      <div className="break-all font-mono text-[12px] text-gray-100">
+        {value || "Not available"}
+      </div>
+      <div className="mt-1 break-all text-[11px] text-gray-500">{hint}</div>
     </div>
   );
 }

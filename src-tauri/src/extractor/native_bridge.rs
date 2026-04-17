@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use tokio::time::{sleep, Duration};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NativeInboxEvent {
     pub action: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub url: String,
     #[serde(default)]
     pub filename: Option<String>,
@@ -44,6 +45,13 @@ pub struct NativeInboxEvent {
     pub wait_for_ack: Option<bool>,
 }
 
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ExtensionHealthSnapshot {
     #[serde(default)]
@@ -68,6 +76,11 @@ pub struct ExtensionHealthState {
     inner: Arc<Mutex<ExtensionHealthSnapshot>>,
 }
 
+pub struct ExternalCaptureQueueState {
+    frontend_ready: Arc<Mutex<bool>>,
+    pending: Arc<Mutex<VecDeque<NativeInboxEvent>>>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CaptureAckPayload {
     pub request_id: String,
@@ -79,6 +92,15 @@ impl Default for ExtensionHealthState {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ExtensionHealthSnapshot::default())),
+        }
+    }
+}
+
+impl Default for ExternalCaptureQueueState {
+    fn default() -> Self {
+        Self {
+            frontend_ready: Arc::new(Mutex::new(false)),
+            pending: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
@@ -104,6 +126,10 @@ fn health_path(config_dir: &PathBuf) -> PathBuf {
     config_dir.join("extension_health.json")
 }
 
+fn app_alive_path(config_dir: &PathBuf) -> PathBuf {
+    config_dir.join("app_alive")
+}
+
 fn capture_ack_dir(config_dir: &PathBuf) -> PathBuf {
     config_dir.join("native_capture_acks")
 }
@@ -127,6 +153,11 @@ async fn save_health(config_dir: &PathBuf, snapshot: &ExtensionHealthSnapshot) {
     }
 }
 
+async fn write_app_alive(config_dir: &PathBuf) {
+    let path = app_alive_path(config_dir);
+    let _ = fs::write(path, current_time_ms().to_string()).await;
+}
+
 pub async fn write_capture_ack(config_dir: &PathBuf, payload: &CaptureAckPayload) -> Result<(), String> {
     let ack_dir = capture_ack_dir(config_dir);
     if !ack_dir.exists() {
@@ -139,6 +170,52 @@ pub async fn write_capture_ack(config_dir: &PathBuf, payload: &CaptureAckPayload
     fs::write(&ack_path, raw)
         .await
         .map_err(|e| format!("Failed to write capture ack '{}': {}", ack_path.display(), e))
+}
+
+async fn emit_or_queue_capture<R: Runtime>(app: &AppHandle<R>, event: NativeInboxEvent) {
+    let queue = app.state::<ExternalCaptureQueueState>();
+    let is_ready = *queue.frontend_ready.lock().await;
+    if is_ready {
+        if let Err(e) = app.emit("external_download_request", event) {
+            log::error!("Failed to emit external_download_request: {}", e);
+        }
+        return;
+    }
+
+    queue.pending.lock().await.push_back(event);
+}
+
+pub async fn mark_external_capture_listener_ready<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let queue = app.state::<ExternalCaptureQueueState>();
+    *queue.frontend_ready.lock().await = true;
+
+    let mut pending = queue.pending.lock().await;
+    while let Some(event) = pending.pop_front() {
+        if let Err(e) = app.emit("external_download_request", event) {
+            log::error!("Failed to flush queued external_download_request: {}", e);
+        }
+    }
+    Ok(())
+}
+
+pub async fn start_app_presence<R: Runtime>(app: AppHandle<R>) {
+    let config_dir = match app.path().app_config_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("Failed to resolve app config dir for app presence: {}", e);
+            return;
+        }
+    };
+
+    let _ = fs::create_dir_all(&config_dir).await;
+    write_app_alive(&config_dir).await;
+
+    tokio::spawn(async move {
+        loop {
+            write_app_alive(&config_dir).await;
+            sleep(Duration::from_secs(4)).await;
+        }
+    });
 }
 
 async fn handle_extension_heartbeat<R: Runtime>(
@@ -254,9 +331,7 @@ pub async fn start_native_inbox_polling<R: Runtime>(app: AppHandle<R>) {
                                 && (event.url.starts_with("http://")
                                     || event.url.starts_with("https://"))
                             {
-                                if let Err(e) = app.emit("external_download_request", event) {
-                                    log::error!("Failed to emit external_download_request: {}", e);
-                                }
+                                emit_or_queue_capture(&app, event).await;
                             }
                         }
                         Err(e) => {
