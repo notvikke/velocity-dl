@@ -1,0 +1,10 @@
+label,url,expected_strategy,skip,note
+direct mp4 sample,https://cdn.example.com/video.mp4,direct_file,false,Locks direct media handling for normal files.
+direct exe sample,https://downloads.example.com/tools/installer.exe,direct_file,false,Guards the generic file handoff path we added for default downloader use.
+hls manifest sample,https://media.example.com/live/master.m3u8?token=abc,hls_manifest,false,Guards HLS manifest preference over raw stream URLs.
+dash manifest sample,https://media.example.com/dash/manifest.mpd,dash_manifest,false,Guards DASH manifest recognition.
+googlevideo playback sample,https://rr2---sn-ab5l6n7s.googlevideo.com/videoplayback?id=123&itag=22,direct_file,false,Guards direct classification for playback URLs without obvious file extensions.
+generic watch page sample,https://media.example.com/watch/alpha,metadata_extractor,false,Watch pages should still go through metadata or capture flow rather than be queued as direct.
+generic portal page sample,https://portal.example.org/video/episode-1,metadata_extractor,false,Watch pages should stay metadata-driven.
+generic embed page sample,https://player.example.net/embed/12345,metadata_extractor,false,Embed or player pages must not be treated as downloadable media URLs.
+generic aggregator page sample,https://catalog.example.org/view/77475121954,metadata_extractor,false,Aggregator pages should stay metadata-driven until capture resolves a concrete stream.

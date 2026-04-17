@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VelocityDL</title>
+    <style>
+      :root {
+        --bg: #0f1116;
+        --panel: #171a22;
+        --line: #2b2f3a;
+        --text: #f4f6fb;
+        --muted: #9da6b6;
+        --ok: #1fbf75;
+        --warn: #e7a338;
+        --btn: #2f89ff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 320px;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.4 "Segoe UI", Arial, sans-serif;
+      }
+      .wrap { padding: 12px; }
+      .head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .head img {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+      }
+      .title { font-weight: 700; font-size: 14px; }
+      .sub { color: var(--muted); font-size: 11px; }
+      .mono { font-family: Consolas, "Courier New", monospace; font-size: 10px; color: var(--muted); margin-top: 2px; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 0;
+      }
+      .row + .row { border-top: 1px solid var(--line); }
+      .label { font-weight: 600; font-size: 12px; }
+      .desc { color: var(--muted); font-size: 11px; }
+      .toggle {
+        position: relative;
+        width: 36px;
+        height: 20px;
+        border-radius: 999px;
+        background: #5f6778;
+        cursor: pointer;
+        border: 0;
+      }
+      .toggle::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #fff;
+        transition: transform 120ms ease;
+      }
+      .toggle.on { background: var(--ok); }
+      .toggle.on::after { transform: translateX(16px); }
+      .btn {
+        width: 100%;
+        border: 0;
+        border-radius: 9px;
+        padding: 9px 10px;
+        font-weight: 700;
+        color: #fff;
+        background: var(--btn);
+        cursor: pointer;
+      }
+      .btn:disabled { opacity: 0.6; cursor: default; }
+      .status {
+        margin-top: 8px;
+        font-size: 11px;
+        color: var(--muted);
+        min-height: 16px;
+      }
+      .ok { color: var(--ok); }
+      .warn { color: var(--warn); }
+      .foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 8px;
+      }
+      .link {
+        color: #9cc0ff;
+        text-decoration: none;
+        font-size: 11px;
+      }
+      .link:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="head">
+        <img src="icons/icon-32.png" alt="VelocityDL" />
+        <div>
+          <div class="title">VelocityDL Bridge</div>
+          <div class="sub" id="nativeState">Checking native host...</div>
+          <div class="mono" id="runtimeId"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <div>
+            <div class="label">Take Over Downloads</div>
+            <div class="desc">Redirect browser downloads to VelocityDL</div>
+          </div>
+          <button class="toggle" id="takeoverToggle" type="button" aria-label="Take over downloads"></button>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">Context Menus</div>
+            <div class="desc">Show right-click download actions</div>
+          </div>
+          <button class="toggle" id="menuToggle" type="button" aria-label="Context menus"></button>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">Auto-open Quality Picker</div>
+            <div class="desc">Scan button opens in-app quality picker by default</div>
+          </div>
+          <button class="toggle" id="scanPickerToggle" type="button" aria-label="Auto-open quality picker"></button>
+        </div>
+      </div>
+
+      <button class="btn" id="scanBtn" type="button">Toggle Scan On This Tab</button>
+      <button class="btn" id="copyDebugBtn" type="button" style="margin-top: 8px; background: #34435f;">Copy Extension Diagnostics</button>
+      <div class="status" id="status"></div>
+
+      <div class="panel">
+        <div class="label" style="margin-bottom: 6px;">Last Scan Debug</div>
+        <div class="desc" id="debugSummary">No scan capture recorded yet.</div>
+        <div class="mono" id="debugDetails" style="white-space: pre-wrap; max-height: 160px; overflow: auto; margin-top: 8px;"></div>
+      </div>
+
+      <div class="foot">
+        <a class="link" href="#" id="openOptions">Advanced options</a>
+      </div>
+    </div>
+    <script src="popup.js" type="module"></script>
+  </body>
+  </html>

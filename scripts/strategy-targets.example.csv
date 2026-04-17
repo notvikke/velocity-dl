@@ -1,0 +1,5 @@
+label,url,expected_strategy,skip,note
+direct sample,https://example.com/video.mp4,direct_file,false,
+hls sample,https://example.com/live/master.m3u8,hls_manifest,false,
+dash sample,https://example.com/stream/manifest.mpd,dash_manifest,false,
+page extractor sample,https://example.com/watch/abc123,metadata_extractor,false,

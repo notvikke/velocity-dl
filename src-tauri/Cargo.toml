@@ -1,0 +1,42 @@
+[package]
+name = "velocitydl"
+version = "0.1.0"
+description = "IDM-Clone Desktop App"
+authors = ["you"]
+edition = "2021"
+default-run = "velocitydl"
+
+[lib]
+name = "velocitydl_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "test"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
+futures-util = "0.3"
+anyhow = "1.0"
+url = "2.5"
+bytes = "1.6"
+tokio-util = { version = "0.7", features = ["io"] }
+dirs = "6.0"
+log = "0.4"
+regex = "1.10"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+winapi = { version = "0.3", features = ["dpapi", "wincrypt", "winbase", "winuser", "errhandlingapi"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+aes-gcm = "0.10"
+arboard = "3.4"
+rodio = "0.19"
+tauri-plugin-clipboard-manager = "2.0.0-rc"
+tauri-plugin-dialog = "2.0.0-rc"
+tauri-plugin-fs = "2.0.0-rc"
+base64 = "0.22.1"
+urlencoding = "2.1"
+zip = "2.1"

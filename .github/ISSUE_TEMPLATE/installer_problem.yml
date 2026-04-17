@@ -1,0 +1,49 @@
+name: Installer Problem
+description: Report install, launch, upgrade, or uninstall issues with the Windows package.
+title: "[Installer]: "
+labels:
+  - installer
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows Version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Failure Phase
+      options:
+        - Install
+        - First launch
+        - Upgrade
+        - Uninstall
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What Happened
+      placeholder: Describe the exact installer or launch failure and any error text shown.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics Or Logs
+      description: Paste any app diagnostics, installer messages, or screenshots details here.
+      render: text
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Notes
+      description: Explain whether this happens consistently and on a clean install.

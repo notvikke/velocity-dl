@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VelocityDL Bridge Settings</title>
+    <style>
+      body { font-family: Segoe UI, sans-serif; margin: 24px; max-width: 680px; }
+      h1 { font-size: 18px; margin-bottom: 18px; }
+      .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; }
+      .desc { color: #555; font-size: 13px; margin-top: 4px; }
+      .status { margin-top: 16px; font-size: 13px; color: #0a7f35; }
+      code { background: #f5f5f5; padding: 2px 4px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>VelocityDL Bridge</h1>
+    <div class="row">
+      <div>
+        <div><strong>Take over browser downloads</strong></div>
+        <div class="desc">Cancel browser download and send URL to VelocityDL (IDM-like default mode).</div>
+      </div>
+      <input id="takeoverAllDownloads" type="checkbox" />
+    </div>
+    <div class="row">
+      <div>
+        <div><strong>Show context menus</strong></div>
+        <div class="desc">Adds right-click: Download with VelocityDL.</div>
+      </div>
+      <input id="showContextMenu" type="checkbox" />
+    </div>
+    <div class="row">
+      <div>
+        <div><strong>Auto-open quality picker on scan capture</strong></div>
+        <div class="desc">If off, scan button one-click downloads current direct stream when detectable.</div>
+      </div>
+      <input id="autoOpenQualityPickerOnScanCapture" type="checkbox" />
+    </div>
+    <div class="status" id="status"></div>
+    <p class="desc">
+      Native host name: <code>com.velocitydl.native_host</code>
+    </p>
+    <script src="options.js" type="module"></script>
+  </body>
+</html>

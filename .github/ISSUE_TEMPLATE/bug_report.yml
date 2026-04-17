@@ -1,0 +1,63 @@
+name: Bug Report
+description: Report a reproducible app, capture, or download problem.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please include clear reproduction steps and attach diagnostics if available.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Which app version or commit are you using?
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: install_type
+    attributes:
+      label: Install Type
+      options:
+        - Windows installer build
+        - Development build
+        - Unclear
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps To Reproduce
+      description: List the exact steps needed to reproduce the problem.
+      placeholder: |
+        1. Open the app
+        2. Paste a URL
+        3. Start download
+        4. Observe the failure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste diagnostics after reviewing and redacting any sensitive details.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional Context
+      description: Include screenshots, logs, or anything else that may help.
