@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 SESSION_RECOVERY.md
 s1.jpg
+vendor-binaries/

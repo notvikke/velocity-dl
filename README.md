@@ -28,6 +28,21 @@ That means:
 - regression protection for known download patterns
 - Windows installer packaging
 
+## Release Variants
+
+Windows alpha builds now ship in two variants:
+
+- Slim installer:
+  - smaller download than the full package
+  - best when the target machine already has WebView2 or reliable internet
+  - downloads some runtime dependencies only when needed
+- Full installer:
+  - much larger download because it carries offline dependencies
+  - bundles WebView2 offline install and bundled media tools
+  - lower first-run failure rate on clean or offline-leaning machines
+
+The browser handoff fix for early extension requests is included in both tracks.
+
 ## Tech Stack
 
 - Tauri 2
@@ -59,6 +74,18 @@ Build a Windows installer:
 
 ```powershell
 npm run bundle:windows
+```
+
+Build the slim Windows installer:
+
+```powershell
+npm run bundle:windows:slim
+```
+
+Build the full Windows installer:
+
+```powershell
+npm run bundle:windows:full
 ```
 
 ## Regression Checks
@@ -106,5 +133,12 @@ For public alpha tracking, use the GitHub issue templates for:
 
 - app bugs
 - Windows installer problems
+
+Known alpha bugs worth reporting with diagnostics:
+
+- browser extension handoff does not reach the desktop app
+- installer succeeds but app fails to open on a clean Windows PC
+- bundled or updated tool status looks wrong in Settings
+- browser capture works in one release track but not the other
 
 See [CHANGELOG.md](/D:/Dev%202026/Tools/VelocityDL/CHANGELOG.md) for the current alpha release summary.

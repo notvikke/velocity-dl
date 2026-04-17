@@ -468,6 +468,7 @@ async function sendCapture(payload) {
     const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
       action: "capture",
       capture_type,
+      sent_at_ms: Date.now(),
       ...payload,
     });
     if (!response?.ok) {

@@ -8,6 +8,25 @@ use tokio::fs;
 pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 pub const FFMPEG_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
 
+#[derive(Debug, Clone)]
+pub struct ResolvedBinary {
+    pub path: PathBuf,
+    pub source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolStatus {
+    pub name: &'static str,
+    pub installed: bool,
+    pub source: String,
+    pub path: Option<String>,
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub update_supported: bool,
+    pub last_error: Option<String>,
+}
+
 pub async fn get_binaries_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     let mut path = app
         .path()
@@ -20,7 +39,242 @@ pub async fn get_binaries_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf>
     Ok(path)
 }
 
+fn bundled_binary_path<R: Runtime>(app: &AppHandle<R>, relative_path: &str) -> Option<PathBuf> {
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join(relative_path))
+        .filter(|path| path.exists())
+}
+
+async fn app_data_binary_path<R: Runtime>(app: &AppHandle<R>, file_name: &str) -> Result<PathBuf> {
+    Ok(get_binaries_dir(app).await?.join(file_name))
+}
+
+pub async fn resolve_ytdlp<R: Runtime>(app: &AppHandle<R>) -> Result<Option<ResolvedBinary>> {
+    let app_data = app_data_binary_path(app, "yt-dlp.exe").await?;
+    if app_data.exists() {
+        return Ok(Some(ResolvedBinary {
+            path: app_data,
+            source: "app_data",
+        }));
+    }
+    if let Some(path) = bundled_binary_path(app, "third-party/yt-dlp.exe") {
+        return Ok(Some(ResolvedBinary {
+            path,
+            source: "bundled",
+        }));
+    }
+    Ok(None)
+}
+
+pub async fn resolve_ffmpeg<R: Runtime>(app: &AppHandle<R>) -> Result<Option<ResolvedBinary>> {
+    let app_data = app_data_binary_path(app, "ffmpeg.exe").await?;
+    if app_data.exists() {
+        return Ok(Some(ResolvedBinary {
+            path: app_data,
+            source: "app_data",
+        }));
+    }
+    if let Some(path) = bundled_binary_path(app, "third-party/ffmpeg.exe") {
+        return Ok(Some(ResolvedBinary {
+            path,
+            source: "bundled",
+        }));
+    }
+    Ok(None)
+}
+
+fn trim_version_line(raw: &str) -> Option<String> {
+    let line = raw.lines().next()?.trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+fn read_command_stdout(mut command: std::process::Command) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+pub fn get_ytdlp_version(path: &PathBuf) -> Option<String> {
+    trim_version_line(&read_command_stdout({
+        let mut cmd = std::process::Command::new(path);
+        cmd.arg("--version");
+        cmd
+    })?)
+}
+
+pub fn get_ffmpeg_version(path: &PathBuf) -> Option<String> {
+    let first_line = trim_version_line(&read_command_stdout({
+        let mut cmd = std::process::Command::new(path);
+        cmd.arg("-version");
+        cmd
+    })?)?;
+    Some(first_line.replace("ffmpeg version ", ""))
+}
+
+async fn latest_github_release_tag(repo: &str) -> Result<String> {
+    let client = Client::builder()
+        .user_agent("VelocityDL/1.0")
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        return Err(anyhow!("GitHub API returned {}", response.status()));
+    }
+    let payload: serde_json::Value = response.json().await?;
+    payload["tag_name"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("Latest release tag_name missing for {repo}"))
+}
+
+fn normalize_ytdlp_version(value: &str) -> String {
+    value.trim().trim_start_matches('v').to_string()
+}
+
+pub async fn get_ytdlp_status<R: Runtime>(app: &AppHandle<R>, include_remote: bool) -> ToolStatus {
+    match resolve_ytdlp(app).await {
+        Ok(Some(binary)) => {
+            let current_version = get_ytdlp_version(&binary.path);
+            let latest_version = if include_remote {
+                latest_github_release_tag("yt-dlp/yt-dlp")
+                    .await
+                    .ok()
+                    .map(|v| normalize_ytdlp_version(&v))
+            } else {
+                None
+            };
+            let update_available = match (&current_version, &latest_version) {
+                (Some(current), Some(latest)) => normalize_ytdlp_version(current) != *latest,
+                _ => false,
+            };
+            ToolStatus {
+                name: "yt-dlp",
+                installed: true,
+                source: binary.source.to_string(),
+                path: Some(binary.path.to_string_lossy().to_string()),
+                current_version,
+                latest_version,
+                update_available,
+                update_supported: true,
+                last_error: None,
+            }
+        }
+        Ok(None) => ToolStatus {
+            name: "yt-dlp",
+            installed: false,
+            source: "missing".to_string(),
+            path: None,
+            current_version: None,
+            latest_version: if include_remote {
+                latest_github_release_tag("yt-dlp/yt-dlp")
+                    .await
+                    .ok()
+                    .map(|v| normalize_ytdlp_version(&v))
+            } else {
+                None
+            },
+            update_available: false,
+            update_supported: true,
+            last_error: None,
+        },
+        Err(err) => ToolStatus {
+            name: "yt-dlp",
+            installed: false,
+            source: "error".to_string(),
+            path: None,
+            current_version: None,
+            latest_version: None,
+            update_available: false,
+            update_supported: true,
+            last_error: Some(err.to_string()),
+        },
+    }
+}
+
+pub async fn get_ffmpeg_status<R: Runtime>(app: &AppHandle<R>, include_remote: bool) -> ToolStatus {
+    let remote = if include_remote {
+        latest_github_release_tag("BtbN/FFmpeg-Builds").await.ok()
+    } else {
+        None
+    };
+
+    match resolve_ffmpeg(app).await {
+        Ok(Some(binary)) => ToolStatus {
+            name: "ffmpeg",
+            installed: true,
+            source: binary.source.to_string(),
+            path: Some(binary.path.to_string_lossy().to_string()),
+            current_version: get_ffmpeg_version(&binary.path),
+            latest_version: remote,
+            update_available: false,
+            update_supported: true,
+            last_error: None,
+        },
+        Ok(None) => {
+            if let Ok(output) = std::process::Command::new("ffmpeg").arg("-version").output() {
+                if output.status.success() {
+                    let first_line = String::from_utf8(output.stdout)
+                        .ok()
+                        .and_then(|raw| trim_version_line(&raw));
+                    return ToolStatus {
+                        name: "ffmpeg",
+                        installed: true,
+                        source: "system".to_string(),
+                        path: Some("ffmpeg".to_string()),
+                        current_version: first_line.map(|line| line.replace("ffmpeg version ", "")),
+                        latest_version: remote,
+                        update_available: false,
+                        update_supported: true,
+                        last_error: None,
+                    };
+                }
+            }
+
+            ToolStatus {
+                name: "ffmpeg",
+                installed: false,
+                source: "missing".to_string(),
+                path: None,
+                current_version: None,
+                latest_version: remote,
+                update_available: false,
+                update_supported: true,
+                last_error: None,
+            }
+        }
+        Err(err) => ToolStatus {
+            name: "ffmpeg",
+            installed: false,
+            source: "error".to_string(),
+            path: None,
+            current_version: None,
+            latest_version: remote,
+            update_available: false,
+            update_supported: true,
+            last_error: Some(err.to_string()),
+        },
+    }
+}
+
 pub async fn ensure_ytdlp<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+    if let Some(resolved) = resolve_ytdlp(app).await? {
+        return Ok(resolved.path);
+    }
+
     let mut ytdlp_path = get_binaries_dir(app).await?;
     ytdlp_path.push("yt-dlp.exe");
 
@@ -54,6 +308,10 @@ pub async fn update_ytdlp<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
 }
 
 pub async fn ensure_ffmpeg<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+    if let Some(resolved) = resolve_ffmpeg(app).await? {
+        return Ok(resolved.path);
+    }
+
     let binaries_dir = get_binaries_dir(app).await?;
     let ffmpeg_path = binaries_dir.join("ffmpeg.exe");
 
@@ -105,6 +363,35 @@ pub async fn ensure_ffmpeg<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
             "Extraction finished but ffmpeg.exe is still missing from binaries folder."
         ))
     }
+}
+
+pub async fn update_ffmpeg<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+    let binaries_dir = get_binaries_dir(app).await?;
+    let ffmpeg_path = binaries_dir.join("ffmpeg.exe");
+
+    let _ = app.emit(
+        "ffmpeg_status",
+        "Downloading FFmpeg update (~100MB)...",
+    );
+
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let download_url = match get_btbn_url(&client).await {
+        Ok(url) => url,
+        Err(e) => {
+            warn!(
+                "[FFmpeg] GitHub API failed during update: {}. Falling back to gyan.dev...",
+                e
+            );
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string()
+        }
+    };
+
+    download_ffmpeg(app, &binaries_dir, &download_url).await?;
+    Ok(ffmpeg_path)
 }
 
 async fn get_btbn_url(client: &Client) -> Result<String> {

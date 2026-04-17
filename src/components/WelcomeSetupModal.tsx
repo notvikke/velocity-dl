@@ -12,6 +12,7 @@ interface AppSettings {
   accept_browser_download_requests: boolean;
   browser_takeover_all_downloads: boolean;
   developer_mode: boolean;
+  auto_check_tool_updates: boolean;
   onboarding_completed: boolean;
   max_threads: number;
   speed_limit_mb: number;

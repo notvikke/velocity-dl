@@ -88,9 +88,27 @@ interface AppSettings {
   accept_browser_download_requests: boolean;
   browser_takeover_all_downloads: boolean;
   developer_mode: boolean;
+  auto_check_tool_updates: boolean;
   onboarding_completed: boolean;
   max_threads: number;
   speed_limit_mb: number;
+}
+
+interface ToolStatusResponse {
+  name: string;
+  installed: boolean;
+  source: string;
+  path?: string;
+  current_version?: string;
+  latest_version?: string;
+  update_available: boolean;
+  update_supported: boolean;
+  last_error?: string;
+}
+
+interface ToolingStatusResponse {
+  ytdlp: ToolStatusResponse;
+  ffmpeg: ToolStatusResponse;
 }
 
 interface ExternalDownloadRequest {
@@ -356,6 +374,24 @@ function App() {
   useEffect(() => {
     refreshExtensionHealth().catch(console.error);
   }, [refreshExtensionHealth]);
+
+  useEffect(() => {
+    if (!appSettings?.auto_check_tool_updates) return;
+    const timer = window.setTimeout(() => {
+      invoke<ToolingStatusResponse>("get_tooling_status", { includeRemote: true })
+        .then((status) => {
+          if (status.ytdlp.update_available) {
+            setDiagnosticStatus("yt-dlp update available in Settings");
+            window.setTimeout(() => setDiagnosticStatus(""), 3000);
+          }
+        })
+        .catch((error) => {
+          console.error("Delayed tool update check failed", error);
+        });
+    }, 12000);
+
+    return () => window.clearTimeout(timer);
+  }, [appSettings?.auto_check_tool_updates]);
 
   useEffect(() => {
     try {
@@ -1150,7 +1186,7 @@ function App() {
             </div>
             <div className="hidden text-gray-600 md:block">{extensionMetaLabel}</div>
             {extensionStatusMessage && <div className="text-gray-400">{extensionStatusMessage}</div>}
-            <div>VelocityDL v0.1.0-alpha.3</div>
+            <div>VelocityDL v0.1.0-alpha.4</div>
           </div>
         </div>
       </div>

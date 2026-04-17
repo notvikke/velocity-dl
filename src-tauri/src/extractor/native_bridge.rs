@@ -233,18 +233,10 @@ pub async fn start_native_inbox_polling<R: Runtime>(app: AppHandle<R>) {
     app.state::<ExtensionHealthState>()
         .replace(initial_health)
         .await;
-    let mut offset = match load_offset(&cursor_path).await {
-        Some(saved) => saved,
-        None => match fs::metadata(&inbox_path).await {
-            Ok(meta) => {
-                // No cursor yet: avoid replaying old backlog on startup.
-                let len = meta.len();
-                save_offset(&cursor_path, len).await;
-                len
-            }
-            Err(_) => 0,
-        },
-    };
+    let mut offset = load_offset(&cursor_path).await.unwrap_or(0);
+    if offset == 0 {
+        save_offset(&cursor_path, 0).await;
+    }
 
     tokio::spawn(async move {
         loop {

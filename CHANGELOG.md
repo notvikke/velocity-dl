@@ -14,6 +14,17 @@ Initial public alpha preparation release.
 - Added app and extension diagnostics copy flows.
 - Added regression coverage for strategy classification and browser handoff behavior.
 
+## 0.1.0-alpha.4 - 2026-04-17
+
+Dual-installer stabilization release.
+
+- Fixed a release-blocking browser handoff regression where the first extension capture could be dropped on startup because native inbox polling began late and the initial inbox cursor skipped unread events.
+- Added runtime tool update controls for `yt-dlp` and `ffmpeg` with delayed background checking so app startup time is not impacted.
+- Added explicit Windows slim/full installer build tracks so slim releases can stay small while full releases carry offline dependencies.
+- Alpha.4 ships with two installer assets:
+  - slim installer with smaller download size and on-demand runtime/tool setup when needed
+  - full installer with bundled offline dependencies for lower first-run failure rate on clean PCs
+
 ## 0.1.0-alpha.3 - 2026-04-17
 
 Assisted browser setup and packaging update.

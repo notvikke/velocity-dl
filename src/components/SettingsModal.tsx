@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Settings, Cpu, HardDrive, Bell, Folder, Plug } from "lucide-react";
+import { X, Settings, Cpu, HardDrive, Bell, Folder, Plug, Wrench } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { copyAppDiagnosticsToClipboard } from "../lib/diagnostics";
 
@@ -13,9 +13,27 @@ interface AppSettings {
   accept_browser_download_requests: boolean;
   browser_takeover_all_downloads: boolean;
   developer_mode: boolean;
+  auto_check_tool_updates: boolean;
   onboarding_completed: boolean;
   max_threads: number;
   speed_limit_mb: number;
+}
+
+interface ToolStatusResponse {
+  name: string;
+  installed: boolean;
+  source: string;
+  path?: string;
+  current_version?: string;
+  latest_version?: string;
+  update_available: boolean;
+  update_supported: boolean;
+  last_error?: string;
+}
+
+interface ToolingStatusResponse {
+  ytdlp: ToolStatusResponse;
+  ffmpeg: ToolStatusResponse;
 }
 
 interface SettingsModalProps {
@@ -26,6 +44,9 @@ interface SettingsModalProps {
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState("engine");
   const [diagnosticStatus, setDiagnosticStatus] = useState("");
+  const [toolStatus, setToolStatus] = useState<ToolingStatusResponse | null>(null);
+  const [toolStatusMessage, setToolStatusMessage] = useState("");
+  const [toolsBusy, setToolsBusy] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({
     default_download_path: "",
     play_sound_on_finish: true,
@@ -35,6 +56,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     accept_browser_download_requests: true,
     browser_takeover_all_downloads: true,
     developer_mode: false,
+    auto_check_tool_updates: true,
     onboarding_completed: false,
     max_threads: 16,
     speed_limit_mb: 0
@@ -45,8 +67,52 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       invoke<AppSettings>("get_settings")
         .then(setSettings)
         .catch(console.error);
+      refreshToolStatus(true).catch(console.error);
     }
   }, [isOpen]);
+
+  const refreshToolStatus = async (includeRemote = false) => {
+    setToolsBusy(true);
+    try {
+      const status = await invoke<ToolingStatusResponse>("get_tooling_status", {
+        includeRemote
+      });
+      setToolStatus(status);
+      if (includeRemote) {
+        setToolStatusMessage("Tool status refreshed");
+        window.setTimeout(() => setToolStatusMessage(""), 1600);
+      }
+    } catch (error) {
+      console.error(error);
+      setToolStatusMessage("Failed to refresh tool status");
+    } finally {
+      setToolsBusy(false);
+    }
+  };
+
+  const handleUpdateTool = async (tool: "yt-dlp" | "ffmpeg") => {
+    setToolsBusy(true);
+    try {
+      const updated = await invoke<ToolStatusResponse>("update_tool_binary", { tool });
+      setToolStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              ytdlp: tool === "yt-dlp" ? updated : prev.ytdlp,
+              ffmpeg: tool === "ffmpeg" ? updated : prev.ffmpeg,
+            }
+          : null
+      );
+      setToolStatusMessage(`${tool} updated`);
+      window.setTimeout(() => setToolStatusMessage(""), 1800);
+      await refreshToolStatus(true);
+    } catch (error) {
+      console.error(error);
+      setToolStatusMessage(`Failed to update ${tool}`);
+    } finally {
+      setToolsBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     try {
@@ -114,6 +180,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 label="Capture"
                 active={activeTab === "capture"}
                 onClick={() => setActiveTab("capture")}
+              />
+              <SidebarItem
+                icon={<Wrench size={16} />}
+                label="Tools"
+                active={activeTab === "tools"}
+                onClick={() => setActiveTab("tools")}
               />
             </div>
 
@@ -259,6 +331,50 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             </div>
                         </section>
                     )}
+
+                    {activeTab === "tools" && (
+                        <section className="space-y-4 animate-in fade-in slide-in-from-left-2 duration-200">
+                            <h3 className="text-sm font-bold text-accent uppercase tracking-widest">Runtime Tools</h3>
+                            <div className="space-y-4">
+                                <ToggleRow
+                                    label="Auto-check yt-dlp updates"
+                                    description="Runs a delayed background update check after startup so launch speed is not affected"
+                                    enabled={settings.auto_check_tool_updates}
+                                    onChange={(v: boolean) => updateSetting('auto_check_tool_updates', v)}
+                                />
+                                <SettingRow
+                                    label="Check Tool Updates"
+                                    description="Fetches the latest upstream release info on demand"
+                                >
+                                    <button
+                                        type="button"
+                                        onClick={() => refreshToolStatus(true)}
+                                        disabled={toolsBusy}
+                                        className="rounded bg-white/5 px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10 disabled:opacity-50"
+                                    >
+                                        {toolsBusy ? "Checking..." : "Check"}
+                                    </button>
+                                </SettingRow>
+                                <ToolStatusCard
+                                    title="yt-dlp"
+                                    tool={toolStatus?.ytdlp}
+                                    actionLabel="Update yt-dlp"
+                                    busy={toolsBusy}
+                                    onUpdate={() => handleUpdateTool("yt-dlp")}
+                                />
+                                <ToolStatusCard
+                                    title="ffmpeg"
+                                    tool={toolStatus?.ffmpeg}
+                                    actionLabel="Update ffmpeg"
+                                    busy={toolsBusy}
+                                    onUpdate={() => handleUpdateTool("ffmpeg")}
+                                />
+                                {toolStatusMessage && (
+                                    <div className="text-[11px] text-gray-400">{toolStatusMessage}</div>
+                                )}
+                            </div>
+                        </section>
+                    )}
                 </div>
 
                 <div className="mt-auto p-4 border-t border-border flex justify-end gap-3 bg-surface/50">
@@ -318,4 +434,54 @@ function ToggleRow({ label, description, enabled, onChange }: any) {
             </div>
         </div>
     );
+}
+
+function ToolStatusCard({
+  title,
+  tool,
+  actionLabel,
+  busy,
+  onUpdate,
+}: {
+  title: string;
+  tool?: ToolStatusResponse;
+  actionLabel: string;
+  busy: boolean;
+  onUpdate: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-background/40 p-4">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <div className="font-medium text-gray-200">{title}</div>
+          <div className="text-xs text-gray-500">
+            Source: {tool?.source || "checking"}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onUpdate}
+          disabled={busy}
+          className="rounded bg-white/5 px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10 disabled:opacity-50"
+        >
+          {busy ? "Working..." : actionLabel}
+        </button>
+      </div>
+      <div className="space-y-1 text-[11px] text-gray-400">
+        <div>Installed: {tool?.installed ? "Yes" : "No"}</div>
+        <div>Current: {tool?.current_version || "Unknown"}</div>
+        <div>Latest: {tool?.latest_version || "Not checked yet"}</div>
+        <div>
+          Status:{" "}
+          {tool?.update_available
+            ? "Update available"
+            : tool?.installed
+              ? "Up to date or not compared"
+              : "Not installed"}
+        </div>
+        {tool?.path && <div className="break-all">Path: {tool.path}</div>}
+        {tool?.last_error && <div className="text-amber-300">{tool.last_error}</div>}
+      </div>
+    </div>
+  );
 }

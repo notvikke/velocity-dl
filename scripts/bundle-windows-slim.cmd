@@ -10,6 +10,6 @@ if errorlevel 1 (
 )
 popd
 
-node "%~dp0..\node_modules\@tauri-apps\cli\tauri.js" build --bundles nsis --config src-tauri/tauri.conf.json
+node "%~dp0..\node_modules\@tauri-apps\cli\tauri.js" build --bundles nsis --config src-tauri/tauri.slim.conf.json
 
 endlocal

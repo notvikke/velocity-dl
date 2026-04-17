@@ -1,12 +1,14 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "node scripts/build.mjs",
     "bundle:windows": "scripts\\bundle-windows.cmd",
+    "bundle:windows:slim": "scripts\\bundle-windows-slim.cmd",
+    "bundle:windows:full": "scripts\\bundle-windows-full.cmd",
     "handoff:regression": "node scripts/browser-handoff-regression.mjs",
     "strategy:probe": "cmd /c \"set \\\"CARGO_TARGET_DIR=src-tauri/target-strategy\\\" && C:\\Users\\vikas\\.cargo\\bin\\cargo.exe run --quiet --manifest-path src-tauri/Cargo.toml --bin strategy_probe --\"",
     "strategy:regression": "cmd /c \"set \\\"CARGO_TARGET_DIR=src-tauri/target-strategy\\\" && C:\\Users\\vikas\\.cargo\\bin\\cargo.exe run --quiet --manifest-path src-tauri/Cargo.toml --bin strategy_probe -- --input scripts/strategy-targets.regression.csv\"",

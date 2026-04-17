@@ -61,6 +61,25 @@ pub struct BrowserIntegrationInstallResult {
     pub edge_manifest_path: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolStatusResponse {
+    pub name: String,
+    pub installed: bool,
+    pub source: String,
+    pub path: Option<String>,
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub update_supported: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolingStatusResponse {
+    pub ytdlp: ToolStatusResponse,
+    pub ffmpeg: ToolStatusResponse,
+}
+
 #[cfg(windows)]
 fn apply_launch_on_startup(enabled: bool) -> Result<(), String> {
     use std::process::Command;
@@ -123,6 +142,20 @@ fn sanitize_filename(name: &str) -> String {
         "downloaded_media".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn map_tool_status(status: binaries::ToolStatus) -> ToolStatusResponse {
+    ToolStatusResponse {
+        name: status.name.to_string(),
+        installed: status.installed,
+        source: status.source,
+        path: status.path,
+        current_version: status.current_version,
+        latest_version: status.latest_version,
+        update_available: status.update_available,
+        update_supported: status.update_supported,
+        last_error: status.last_error,
     }
 }
 
@@ -709,6 +742,40 @@ pub async fn get_browser_integration_status<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn get_tooling_status<R: Runtime>(
+    app: AppHandle<R>,
+    include_remote: Option<bool>,
+) -> Result<ToolingStatusResponse, String> {
+    let include_remote = include_remote.unwrap_or(false);
+    let ytdlp = binaries::get_ytdlp_status(&app, include_remote).await;
+    let ffmpeg = binaries::get_ffmpeg_status(&app, include_remote).await;
+
+    Ok(ToolingStatusResponse {
+        ytdlp: map_tool_status(ytdlp),
+        ffmpeg: map_tool_status(ffmpeg),
+    })
+}
+
+#[tauri::command]
+pub async fn update_tool_binary<R: Runtime>(
+    app: AppHandle<R>,
+    tool: String,
+) -> Result<ToolStatusResponse, String> {
+    let normalized = tool.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "yt-dlp" | "ytdlp" => {
+            binaries::update_ytdlp(&app).await.map_err(|e| e.to_string())?;
+            Ok(map_tool_status(binaries::get_ytdlp_status(&app, true).await))
+        }
+        "ffmpeg" => {
+            binaries::update_ffmpeg(&app).await.map_err(|e| e.to_string())?;
+            Ok(map_tool_status(binaries::get_ffmpeg_status(&app, true).await))
+        }
+        _ => Err("Unsupported tool update target".to_string()),
+    }
+}
+
+#[tauri::command]
 pub async fn open_browser_extensions_page<R: Runtime>(
     _app: AppHandle<R>,
     browser: String,
@@ -886,8 +953,11 @@ pub async fn fetch_metadata<R: Runtime>(
                 first_err
             );
             if let Ok(()) = binaries::update_ytdlp(&app).await {
+                let refreshed_ytdlp_path = binaries::ensure_ytdlp(&app)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let url_retry = url.clone();
-                let path_retry = ytdlp_path.clone();
+                let path_retry = refreshed_ytdlp_path;
                 let config_retry = config_dir.clone();
                 let headers_retry = headers.clone();
                 let retry_result = tokio::task::spawn_blocking(move || {

@@ -18,6 +18,8 @@ pub struct AppSettings {
     pub browser_takeover_all_downloads: bool,
     #[serde(default)]
     pub developer_mode: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_tool_updates: bool,
     #[serde(default)]
     pub onboarding_completed: bool,
     pub max_threads: u32,
@@ -65,6 +67,7 @@ impl Default for AppSettings {
             accept_browser_download_requests: true,
             browser_takeover_all_downloads: true,
             developer_mode: false,
+            auto_check_tool_updates: true,
             onboarding_completed: false,
             max_threads: 16,
             speed_limit_mb: 0,

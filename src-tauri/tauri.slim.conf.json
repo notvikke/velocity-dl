@@ -30,14 +30,11 @@
     "targets": "all",
     "resources": {
       "../chromium-extension/": "chromium-extension",
-      "target/release/vdl_native_host.exe": "native-host/vdl_native_host.exe",
-      "../vendor-binaries/yt-dlp.exe": "third-party/yt-dlp.exe",
-      "../vendor-binaries/ffmpeg.exe": "third-party/ffmpeg.exe",
-      "../vendor-binaries/ffprobe.exe": "third-party/ffprobe.exe"
+      "target/release/vdl_native_host.exe": "native-host/vdl_native_host.exe"
     },
     "windows": {
       "webviewInstallMode": {
-        "type": "offlineInstaller",
+        "type": "downloadBootstrapper",
         "silent": true
       }
     },
