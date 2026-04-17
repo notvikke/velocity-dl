@@ -9,9 +9,13 @@ pub struct AppSettings {
     pub play_sound_on_finish: bool,
     pub play_sound_on_fail: bool,
     #[serde(default)]
+    pub launch_on_startup: bool,
+    #[serde(default)]
     pub auto_start_sniff_capture: bool,
     #[serde(default = "default_true")]
     pub accept_browser_download_requests: bool,
+    #[serde(default = "default_true")]
+    pub browser_takeover_all_downloads: bool,
     #[serde(default)]
     pub developer_mode: bool,
     #[serde(default)]
@@ -56,8 +60,10 @@ impl Default for AppSettings {
             default_download_path: download_dir.join("VelocityDL"),
             play_sound_on_finish: true,
             play_sound_on_fail: true,
+            launch_on_startup: false,
             auto_start_sniff_capture: false,
             accept_browser_download_requests: true,
+            browser_takeover_all_downloads: true,
             developer_mode: false,
             onboarding_completed: false,
             max_threads: 16,

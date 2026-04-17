@@ -1,13 +1,17 @@
 use crate::engine::manager::DownloadManager;
 use crate::extractor::clipboard::start_clipboard_polling;
-use crate::extractor::native_bridge::start_native_inbox_polling;
+use crate::extractor::native_bridge::{start_native_inbox_polling, ExtensionHealthState};
 use crate::ipc::commands::{
-    add_download, fetch_metadata, get_app_diagnostics, get_settings, open_folder, pause_download,
+    ack_external_capture_request, add_download, fetch_metadata, get_app_diagnostics,
+    get_extension_health, get_settings, open_extension_setup_link, open_folder, pause_download,
     save_settings, start_sniffing,
 };
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::net::TcpStream;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::{TrayIconBuilder, TrayIconEvent},
+    tray::TrayIconBuilder,
     Manager,
 };
 
@@ -17,16 +21,64 @@ pub mod extractor;
 pub mod ipc;
 pub mod protocols;
 
+struct SingleInstanceGuard {
+    _listener: TcpListener,
+}
+
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn acquire_single_instance_guard() -> Result<SingleInstanceGuard, std::io::Error> {
+    match TcpListener::bind("127.0.0.1:43187") {
+        Ok(listener) => Ok(SingleInstanceGuard {
+            _listener: listener,
+        }),
+        Err(bind_err) => {
+            if let Ok(mut stream) = TcpStream::connect("127.0.0.1:43187") {
+                let _ = stream.write_all(b"show");
+            }
+            Err(bind_err)
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(DownloadManager::new())
         .manage(auth::store::AuthManager::new())
+        .manage(ExtensionHealthState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            let guard = match acquire_single_instance_guard() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    std::process::exit(0);
+                }
+            };
+            if let Ok(listener) = guard._listener.try_clone() {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    for incoming in listener.incoming() {
+                        let Ok(mut stream) = incoming else {
+                            continue;
+                        };
+                        let mut buf = [0_u8; 16];
+                        let _ = stream.read(&mut buf);
+                        show_main_window(&app_handle);
+                    }
+                });
+            }
+            app.manage(guard);
+
             let main_window = app.get_webview_window("main").unwrap();
             let _ = main_window.show();
 
@@ -49,29 +101,15 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
                         app.exit(0);
                     }
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        show_main_window(app);
                     }
                     _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button_state: _, ..
-                    } = event
-                    {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
                 })
                 .build(app)?;
 
@@ -91,9 +129,12 @@ pub fn run() {
             add_download,
             pause_download,
             get_settings,
+            get_extension_health,
             get_app_diagnostics,
+            ack_external_capture_request,
             save_settings,
             fetch_metadata,
+            open_extension_setup_link,
             open_folder,
             start_sniffing
         ])

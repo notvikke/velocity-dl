@@ -1,6 +1,10 @@
 use crate::engine::manager::DownloadManager;
 use crate::engine::settings::AppSettings;
-use crate::extractor::{binaries, webview, ytdlp};
+use crate::extractor::{
+    binaries,
+    native_bridge::{write_capture_ack, CaptureAckPayload, ExtensionHealthState},
+    webview, ytdlp,
+};
 use crate::protocols::strategy::{classify_media_strategy, MediaStrategy};
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, RANGE};
 use serde::{Deserialize, Serialize};
@@ -25,6 +29,65 @@ pub struct DownloadItem {
     pub headers: Option<HashMap<String, String>>,
     pub audio_headers: Option<HashMap<String, String>>,
     pub download_strategy: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExtensionHealthResponse {
+    pub install_url: String,
+    pub setup_url: String,
+    pub last_heartbeat_at_ms: Option<u64>,
+    pub last_seen_browser: Option<String>,
+    pub last_seen_extension_version: Option<String>,
+    pub last_seen_runtime_id: Option<String>,
+    pub status: String,
+    pub status_label: String,
+}
+
+#[cfg(windows)]
+fn apply_launch_on_startup(enabled: bool) -> Result<(), String> {
+    use std::process::Command;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_value = format!("\"{}\"", exe.display());
+
+    let status = if enabled {
+        Command::new("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "VelocityDL",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &exe_value,
+                "/f",
+            ])
+            .status()
+            .map_err(|e| e.to_string())?
+    } else {
+        Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "VelocityDL",
+                "/f",
+            ])
+            .status()
+            .map_err(|e| e.to_string())?
+    };
+
+    if status.success() || !enabled {
+        Ok(())
+    } else {
+        Err("Failed to update Windows startup registration".to_string())
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_launch_on_startup(_enabled: bool) -> Result<(), String> {
+    Ok(())
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -408,11 +471,93 @@ pub async fn get_settings<R: Runtime>(app: AppHandle<R>) -> Result<AppSettings, 
 }
 
 #[tauri::command]
+pub async fn get_extension_health<R: Runtime>(
+    app: AppHandle<R>,
+    health: State<'_, ExtensionHealthState>,
+) -> Result<ExtensionHealthResponse, String> {
+    const HEARTBEAT_FRESH_MS: u64 = 6 * 60 * 1000;
+    const HEARTBEAT_STALE_MS: u64 = 24 * 60 * 60 * 1000;
+    const INSTALL_URL: &str = "https://github.com/notvikke/velocity-dl/tree/main/chromium-extension";
+    const SETUP_URL: &str = "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md";
+
+    let snapshot = health.snapshot().await;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let settings = AppSettings::load(app.path().app_config_dir().map_err(|e| e.to_string())?).await;
+
+    let (status, status_label) = match snapshot.last_heartbeat_at_ms {
+        Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_FRESH_MS => (
+            "connected".to_string(),
+            "Extension Connected".to_string(),
+        ),
+        Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_STALE_MS => (
+            "stale".to_string(),
+            "Extension Seen Recently".to_string(),
+        ),
+        Some(_) => ("inactive".to_string(), "Extension Not Active".to_string()),
+        None => ("not_detected".to_string(), "Extension Not Detected".to_string()),
+    };
+
+    let status_label = if !settings.accept_browser_download_requests {
+        format!("{status_label} (App Capture Disabled)")
+    } else {
+        status_label
+    };
+
+    Ok(ExtensionHealthResponse {
+        install_url: INSTALL_URL.to_string(),
+        setup_url: SETUP_URL.to_string(),
+        last_heartbeat_at_ms: snapshot.last_heartbeat_at_ms,
+        last_seen_browser: snapshot.last_seen_browser,
+        last_seen_extension_version: snapshot.last_seen_extension_version,
+        last_seen_runtime_id: snapshot.last_seen_runtime_id,
+        status,
+        status_label,
+    })
+}
+
+#[tauri::command]
+pub async fn open_extension_setup_link<R: Runtime>(
+    app: AppHandle<R>,
+    url: String,
+) -> Result<(), String> {
+    app.opener().open_url(url, None::<String>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn ack_external_capture_request<R: Runtime>(
+    app: AppHandle<R>,
+    request_id: String,
+    accepted: bool,
+    message: Option<String>,
+) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    write_capture_ack(
+        &config_dir,
+        &CaptureAckPayload {
+            request_id,
+            accepted,
+            message: message.unwrap_or_else(|| {
+                if accepted {
+                    "accepted".to_string()
+                } else {
+                    "rejected".to_string()
+                }
+            }),
+        },
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn save_settings<R: Runtime>(
     app: AppHandle<R>,
     settings: AppSettings,
 ) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    apply_launch_on_startup(settings.launch_on_startup)?;
     settings.save(config_dir).await.map_err(|e| e.to_string())
 }
 

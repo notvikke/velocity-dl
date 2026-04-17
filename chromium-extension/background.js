@@ -1,4 +1,6 @@
 const NATIVE_HOST = "com.velocitydl.native_host";
+const HEARTBEAT_ALARM = "vdlExtensionHeartbeat";
+const HEARTBEAT_PERIOD_MINUTES = 5;
 
 const DEFAULT_SETTINGS = {
   takeoverAllDownloads: true,
@@ -471,8 +473,10 @@ async function sendCapture(payload) {
     if (!response?.ok) {
       console.warn("[VelocityDL] Native host returned error:", response?.message);
     }
+    return response || { ok: false, message: "no response" };
   } catch (err) {
     console.warn("[VelocityDL] Native host communication failed:", err);
+    return { ok: false, message: String(err?.message || err || "native host unavailable") };
   }
 }
 
@@ -488,6 +492,67 @@ async function pingNativeHost() {
   } catch (err) {
     return { ok: false, message: String(err?.message || err || "native host unavailable") };
   }
+}
+
+async function fetchHostPreferences() {
+  try {
+    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+      action: "get_preferences",
+    });
+    if (response?.ok !== true) return null;
+    return {
+      acceptBrowserCaptures: response.accept_browser_download_requests !== false,
+      takeoverAllDownloads: response.browser_takeover_all_downloads !== false,
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+async function applyHostPreferences(reason = "startup") {
+  const prefs = await fetchHostPreferences();
+  if (!prefs) return false;
+
+  const current = await chrome.storage.local.get(DEFAULT_SETTINGS);
+  const next = {
+    ...current,
+    takeoverAllDownloads: prefs.takeoverAllDownloads,
+  };
+
+  await chrome.storage.local.set(next);
+  if (reason === "startup" || reason === "install") {
+    queueRebuildContextMenus(next.showContextMenu);
+  }
+  return true;
+}
+
+async function sendHeartbeat(reason = "background") {
+  try {
+    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+      action: "heartbeat",
+      browser: "chromium",
+      extension_version: chrome.runtime.getManifest().version || "unknown",
+      runtime_id: chrome.runtime.id,
+      source: `extension-heartbeat:${reason}`,
+      sent_at_ms: Date.now(),
+    });
+    if (response?.ok === true) {
+      return { ok: true, message: "heartbeat sent" };
+    }
+    return { ok: false, message: response?.message || "heartbeat failed" };
+  } catch (err) {
+    return { ok: false, message: String(err?.message || err || "heartbeat unavailable") };
+  }
+}
+
+async function scheduleHeartbeatAlarm() {
+  try {
+    await chrome.alarms.clear(HEARTBEAT_ALARM);
+  } catch {}
+  chrome.alarms.create(HEARTBEAT_ALARM, {
+    delayInMinutes: 0.2,
+    periodInMinutes: HEARTBEAT_PERIOD_MINUTES,
+  });
 }
 
 async function toggleScanOnTab(tab) {
@@ -550,32 +615,50 @@ async function flushPendingBrowserDownload(id) {
     return;
   }
 
-  await sendCapture({
+  const requestId = `downloads-${id}-${Date.now()}`;
+  const handoff = await sendCapture({
     url: candidateUrl,
     filename: pending.filename || null,
     mime: pending.mime || null,
     source: "chromium-downloads-api",
     headers: null,
+    request_id: requestId,
+    wait_for_ack: true,
   });
 
-  try {
-    await chrome.downloads.cancel(id);
-    await chrome.downloads.erase({ id });
-  } catch (e) {
-    // Some downloads cannot be cancelled quickly enough; ignore gracefully.
+  if (handoff?.accepted === true || handoff?.ok === true) {
+    try {
+      await chrome.downloads.cancel(id);
+      await chrome.downloads.erase({ id });
+    } catch (e) {
+      // Some downloads cannot be cancelled quickly enough; ignore gracefully.
+    }
+  } else {
+    console.warn("[VelocityDL] Browser fallback retained download:", handoff?.message || "handoff rejected");
   }
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
   const settings = await getSettings();
   await chrome.storage.local.set(settings);
+  await applyHostPreferences("install");
   await chrome.storage.session.set({ [ACTIVE_SCAN_TABS_KEY]: [] });
   queueRebuildContextMenus(settings.showContextMenu);
+  await scheduleHeartbeatAlarm();
+  await sendHeartbeat("installed");
 });
 chrome.runtime.onStartup.addListener(async () => {
   const settings = await getSettings();
+  await applyHostPreferences("startup");
   await initializeActiveScanTabs();
   queueRebuildContextMenus(settings.showContextMenu);
+  await scheduleHeartbeatAlarm();
+  await sendHeartbeat("startup");
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm?.name !== HEARTBEAT_ALARM) return;
+  await sendHeartbeat("alarm");
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -679,8 +762,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const settings = await getSettings();
       const native = await pingNativeHost();
-      const debug = (await chrome.storage.session.get(LAST_SCAN_DEBUG_KEY))?.[LAST_SCAN_DEBUG_KEY] || null;
-      sendResponse({ ok: true, settings, native, runtimeId: chrome.runtime.id });
+      const heartbeat = await sendHeartbeat("popup_state");
+      sendResponse({
+        ok: true,
+        settings,
+        native,
+        heartbeat,
+        runtimeId: chrome.runtime.id,
+        extensionVersion: chrome.runtime.getManifest().version || "unknown",
+      });
     })();
     return true;
   }

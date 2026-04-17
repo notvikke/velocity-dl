@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Download, Folder, Plug, Bell, Radar } from "lucide-react";
+import { Download, Folder, Plug, Bell, Radar, Power } from "lucide-react";
 
 interface AppSettings {
   default_download_path: string;
   play_sound_on_finish: boolean;
   play_sound_on_fail: boolean;
+  launch_on_startup: boolean;
   auto_start_sniff_capture: boolean;
   accept_browser_download_requests: boolean;
+  browser_takeover_all_downloads: boolean;
   developer_mode: boolean;
   onboarding_completed: boolean;
   max_threads: number;
@@ -77,7 +79,7 @@ export function WelcomeSetupModal({
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto p-4">
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -88,7 +90,7 @@ export function WelcomeSetupModal({
             initial={{ opacity: 0, scale: 0.97, y: 24 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 24 }}
-            className="relative z-10 w-full max-w-2xl overflow-hidden rounded-2xl border border-white/10 bg-[#111111] shadow-2xl"
+            className="relative z-10 my-6 flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#111111] shadow-2xl"
           >
             <div className="border-b border-white/8 bg-[radial-gradient(circle_at_top,#1d1d1d_0%,#111111_62%)] px-8 py-7">
               <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
@@ -102,7 +104,7 @@ export function WelcomeSetupModal({
               </p>
             </div>
 
-            <div className="space-y-5 px-8 py-7">
+            <div className="space-y-5 overflow-y-auto px-8 py-7">
               <SettingBlock
                 icon={<Folder size={16} />}
                 label="Default Download Folder"
@@ -124,6 +126,14 @@ export function WelcomeSetupModal({
               />
 
               <ToggleBlock
+                icon={<Download size={16} />}
+                label="Take Over Browser Downloads"
+                description="Recommended. Use the browser extension's default handoff mode so standard browser downloads go to VelocityDL."
+                enabled={settings.browser_takeover_all_downloads}
+                onChange={(value) => updateSetting("browser_takeover_all_downloads", value)}
+              />
+
+              <ToggleBlock
                 icon={<Radar size={16} />}
                 label="Auto-start Captured Streams"
                 description="Immediately queue media found through the in-app capture tools."
@@ -142,10 +152,18 @@ export function WelcomeSetupModal({
                 }}
               />
 
+              <ToggleBlock
+                icon={<Power size={16} />}
+                label="Launch On Startup"
+                description="Start VelocityDL automatically when you sign in to Windows."
+                enabled={settings.launch_on_startup}
+                onChange={(value) => updateSetting("launch_on_startup", value)}
+              />
+
               {error && <div className="text-sm text-rose-300">{error}</div>}
             </div>
 
-            <div className="flex items-center justify-between border-t border-white/8 bg-white/[0.02] px-8 py-5">
+            <div className="flex shrink-0 items-center justify-between border-t border-white/8 bg-white/[0.02] px-8 py-5">
               <p className="text-xs text-zinc-500">
                 Installer-ready defaults for this device. You can revisit them at any time.
               </p>

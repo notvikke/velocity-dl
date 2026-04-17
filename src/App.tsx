@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Download, CheckCircle, Film, Music, FileText, LayoutGrid, Settings, Plus, Maximize2, Minimize2, X, Search } from "lucide-react";
+import { Download, CheckCircle, Film, Music, FileText, LayoutGrid, Settings, Plus, Maximize2, Minimize2, X, Search, Puzzle } from "lucide-react";
 import { DownloadCard } from "./components/DownloadCard";
 import { WelcomeSetupModal } from "./components/WelcomeSetupModal";
 import { copyAppDiagnosticsToClipboard, installConsoleDiagnostics } from "./lib/diagnostics";
@@ -80,8 +80,10 @@ interface AppSettings {
   default_download_path: string;
   play_sound_on_finish: boolean;
   play_sound_on_fail: boolean;
+  launch_on_startup: boolean;
   auto_start_sniff_capture: boolean;
   accept_browser_download_requests: boolean;
+  browser_takeover_all_downloads: boolean;
   developer_mode: boolean;
   onboarding_completed: boolean;
   max_threads: number;
@@ -89,6 +91,7 @@ interface AppSettings {
 }
 
 interface ExternalDownloadRequest {
+  action?: string;
   url: string;
   filename?: string;
   mime?: string;
@@ -98,6 +101,26 @@ interface ExternalDownloadRequest {
   capture_type?: "page_url" | "direct_media_url" | "blob_backed_media";
   raw_media_url?: string;
   headers?: Record<string, string>;
+  request_id?: string;
+  wait_for_ack?: boolean;
+}
+
+interface ExtensionHealth {
+  install_url: string;
+  setup_url: string;
+  last_heartbeat_at_ms?: number;
+  last_seen_browser?: string;
+  last_seen_extension_version?: string;
+  last_seen_runtime_id?: string;
+  status: "connected" | "stale" | "inactive" | "not_detected";
+  status_label: string;
+}
+
+interface ExtensionHealthEvent {
+  heartbeat_at_ms: number;
+  browser?: string;
+  extension_version?: string;
+  runtime_id?: string;
 }
 
 type CaptureType = "page_url" | "direct_media_url" | "blob_backed_media";
@@ -277,6 +300,8 @@ function App() {
   const [diagnosticStatus, setDiagnosticStatus] = useState("");
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [showWelcomeSetup, setShowWelcomeSetup] = useState(false);
+  const [extensionHealth, setExtensionHealth] = useState<ExtensionHealth | null>(null);
+  const [extensionStatusMessage, setExtensionStatusMessage] = useState("");
 
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const [hydrated, setHydrated] = useState(false);
@@ -306,6 +331,27 @@ function App() {
       })
       .catch(console.error);
   }, [isSettingsOpen]);
+
+  const refreshExtensionHealth = useCallback(async (messageOnRefresh?: string) => {
+    try {
+      const health = await invoke<ExtensionHealth>("get_extension_health");
+      setExtensionHealth(health);
+      if (messageOnRefresh) {
+        setExtensionStatusMessage(messageOnRefresh);
+        window.setTimeout(() => setExtensionStatusMessage(""), 1800);
+      }
+      return health;
+    } catch (error) {
+      console.error("Failed to fetch extension health", error);
+      setExtensionStatusMessage("Extension status check failed");
+      window.setTimeout(() => setExtensionStatusMessage(""), 2200);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshExtensionHealth().catch(console.error);
+  }, [refreshExtensionHealth]);
 
   useEffect(() => {
     try {
@@ -386,6 +432,21 @@ function App() {
     });
     const unlistenExternal = listen<ExternalDownloadRequest>("external_download_request", async (event) => {
       const payload = event.payload;
+      const requestId = payload.request_id;
+      let ackSent = false;
+      const ackRequest = async (accepted: boolean, message: string) => {
+        if (!requestId || ackSent) return;
+        ackSent = true;
+        try {
+          await invoke("ack_external_capture_request", {
+            requestId,
+            accepted,
+            message,
+          });
+        } catch (ackError) {
+          console.error("Failed to acknowledge external capture request", ackError);
+        }
+      };
       const captureType = inferCaptureType(payload);
       const rawHttpMediaUrl = isHttpUrl(payload.raw_media_url) ? payload.raw_media_url! : null;
       const referrerUrl = payload.referrer || "";
@@ -419,6 +480,7 @@ function App() {
 
       if (!effectiveUrl?.startsWith("http")) {
         recordCapture("ignored_invalid_url");
+        await ackRequest(false, "Invalid capture URL");
         return;
       }
 
@@ -432,6 +494,7 @@ function App() {
       const seenAt = recentAutoCapturesRef.current.get(dedupeKey);
       if (seenAt && now - seenAt < AUTO_CAPTURE_DEDUPE_WINDOW_MS) {
         recordCapture("ignored_duplicate");
+        await ackRequest(false, "Duplicate capture ignored");
         return;
       }
 
@@ -444,6 +507,7 @@ function App() {
       if (hasActiveSameUrl) {
         recentAutoCapturesRef.current.set(dedupeKey, now);
         recordCapture("ignored_duplicate");
+        await ackRequest(false, "Matching active download already exists");
         return;
       }
 
@@ -451,6 +515,7 @@ function App() {
         const settings = await invoke<AppSettings>("get_settings");
         if (!settings.accept_browser_download_requests) {
           recordCapture("ignored_by_setting");
+          await ackRequest(false, "Browser captures disabled in app settings");
           return;
         }
 
@@ -496,9 +561,11 @@ function App() {
           if (queued) {
             recentAutoCapturesRef.current.set(dedupeKey, now);
             recordCapture("auto_queued_direct");
+            await ackRequest(true, "Download accepted by app");
             return true;
           }
           recordCapture("auto_queue_failed");
+          await ackRequest(false, "App failed to queue download");
           return false;
         };
 
@@ -509,6 +576,7 @@ function App() {
         // 4) Otherwise treat as direct candidate -> direct queue, fallback to modal.
         if (shouldPreferYouTubeMetadata) {
           openMetadataModal(referrerUrl || payloadUrl, "opened_metadata_modal");
+          await ackRequest(false, "Opened metadata flow instead of direct takeover");
           return;
         }
 
@@ -533,11 +601,13 @@ function App() {
 
         if (captureType === "page_url" || captureType === "blob_backed_media") {
           openMetadataModal(scanDirectCandidateUrl || payload.url, "opened_metadata_modal");
+          await ackRequest(false, "Opened metadata flow instead of direct takeover");
           return;
         }
 
         if (isScanCapture && scanAutoOpenQualityPicker && !isClearlyDirectMedia(effectiveUrl)) {
           openMetadataModal(scanDirectCandidateUrl || payload.url, "opened_metadata_modal");
+          await ackRequest(false, "Opened metadata flow instead of direct takeover");
           return;
         }
 
@@ -548,6 +618,7 @@ function App() {
       } catch (e) {
         console.error("Failed to process browser extension capture", e);
         recordCapture("auto_queue_failed");
+        await ackRequest(false, "App capture processing failed");
       }
     });
 
@@ -567,11 +638,38 @@ function App() {
         return next;
       }));
     });
+    const unlistenExtensionHealth = listen<ExtensionHealthEvent>("extension_health_changed", (event) => {
+      setExtensionHealth((prev) => {
+        if (!prev) {
+          return {
+            install_url: "https://github.com/notvikke/velocity-dl/tree/main/chromium-extension",
+            setup_url: "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md",
+            status: "connected",
+            status_label: "Extension Connected",
+            last_heartbeat_at_ms: event.payload.heartbeat_at_ms,
+            last_seen_browser: event.payload.browser,
+            last_seen_extension_version: event.payload.extension_version,
+            last_seen_runtime_id: event.payload.runtime_id,
+          };
+        }
+        return {
+          ...prev,
+          status: "connected",
+          status_label: "Extension Connected",
+          last_heartbeat_at_ms: event.payload.heartbeat_at_ms,
+          last_seen_browser: event.payload.browser || prev.last_seen_browser,
+          last_seen_extension_version:
+            event.payload.extension_version || prev.last_seen_extension_version,
+          last_seen_runtime_id: event.payload.runtime_id || prev.last_seen_runtime_id,
+        };
+      });
+    });
 
     return () => {
       unlistenMedia.then(f => f());
       unlistenExternal.then(f => f());
       unlistenProgress.then(f => f());
+      unlistenExtensionHealth.then(f => f());
     };
   }, [maxThreads]);
 
@@ -740,6 +838,47 @@ function App() {
     }
     setShowWelcomeSetup(!settings.onboarding_completed);
   }, []);
+
+  const handleOpenExtensionLink = useCallback(async (kind: "install" | "setup") => {
+    const health = extensionHealth ?? (await refreshExtensionHealth());
+    if (!health) return;
+    const url = kind === "install" ? health.install_url : health.setup_url;
+    try {
+      await invoke("open_extension_setup_link", { url });
+    } catch (error) {
+      console.error("Failed to open extension link", error);
+      setExtensionStatusMessage("Failed to open extension link");
+      window.setTimeout(() => setExtensionStatusMessage(""), 2200);
+    }
+  }, [extensionHealth, refreshExtensionHealth]);
+
+  const handleCheckExtension = useCallback(async () => {
+    const health = await refreshExtensionHealth();
+    if (!health) return;
+    const label =
+      health.status === "connected"
+        ? "Extension connected"
+        : health.status === "stale"
+          ? "Extension seen recently"
+          : "Extension not detected";
+    setExtensionStatusMessage(label);
+    window.setTimeout(() => setExtensionStatusMessage(""), 2200);
+  }, [refreshExtensionHealth]);
+
+  const extensionMetaLabel = useMemo(() => {
+    if (!extensionHealth) return "Checking extension...";
+    const details = [
+      extensionHealth.last_seen_browser,
+      extensionHealth.last_seen_extension_version
+        ? `v${extensionHealth.last_seen_extension_version}`
+        : null,
+    ].filter(Boolean);
+    if (extensionHealth.last_heartbeat_at_ms) {
+      const when = new Date(extensionHealth.last_heartbeat_at_ms).toLocaleTimeString();
+      details.push(`seen ${when}`);
+    }
+    return details.length ? details.join(" | ") : "Recommended for better capture reliability";
+  }, [extensionHealth]);
 
   const filteredDownloads = useMemo(() => {
     const normalizedSearch = deferredSearchTerm;
@@ -957,7 +1096,33 @@ function App() {
              <span>Active: {downloadStats.runningCount}</span>
              <span>Threads: {maxThreads}</span>
           </div>
-          <div>VelocityDL v0.1.0 Stable</div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <Puzzle size={12} className="text-gray-400" />
+              <span>{extensionHealth?.status_label || "Checking extension..."}</span>
+              <button
+                onClick={handleCheckExtension}
+                className="text-gray-400 hover:text-white transition-colors"
+              >
+                Check
+              </button>
+              <button
+                onClick={() => handleOpenExtensionLink("install")}
+                className="text-accent hover:text-accent/80 transition-colors"
+              >
+                Install
+              </button>
+              <button
+                onClick={() => handleOpenExtensionLink("setup")}
+                className="text-gray-400 hover:text-white transition-colors"
+              >
+                Setup
+              </button>
+            </div>
+            <div className="hidden text-gray-600 md:block">{extensionMetaLabel}</div>
+            {extensionStatusMessage && <div className="text-gray-400">{extensionStatusMessage}</div>}
+            <div>VelocityDL v0.1.0-alpha.2</div>
+          </div>
         </div>
       </div>
     </div>

@@ -8,8 +8,10 @@ interface AppSettings {
   default_download_path: string;
   play_sound_on_finish: boolean;
   play_sound_on_fail: boolean;
+  launch_on_startup: boolean;
   auto_start_sniff_capture: boolean;
   accept_browser_download_requests: boolean;
+  browser_takeover_all_downloads: boolean;
   developer_mode: boolean;
   onboarding_completed: boolean;
   max_threads: number;
@@ -28,8 +30,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     default_download_path: "",
     play_sound_on_finish: true,
     play_sound_on_fail: true,
+    launch_on_startup: false,
     auto_start_sniff_capture: false,
     accept_browser_download_requests: true,
+    browser_takeover_all_downloads: true,
     developer_mode: false,
     onboarding_completed: false,
     max_threads: 16,
@@ -199,6 +203,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                     enabled={settings.play_sound_on_fail}
                                     onChange={(v: boolean) => updateSetting('play_sound_on_fail', v)}
                                 />
+                                <ToggleRow
+                                    label="Launch on Windows sign-in"
+                                    description="Start VelocityDL automatically when you log in"
+                                    enabled={settings.launch_on_startup}
+                                    onChange={(v: boolean) => updateSetting('launch_on_startup', v)}
+                                />
                             </div>
                         </section>
                     )}
@@ -218,6 +228,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                     description="Allow Chromium extension/native bridge to auto-queue downloads"
                                     enabled={settings.accept_browser_download_requests}
                                     onChange={(v: boolean) => updateSetting('accept_browser_download_requests', v)}
+                                />
+                                <ToggleRow
+                                    label="Take over browser downloads"
+                                    description="Use the extension's default handoff mode for standard browser downloads on browser startup"
+                                    enabled={settings.browser_takeover_all_downloads}
+                                    onChange={(v: boolean) => updateSetting('browser_takeover_all_downloads', v)}
                                 />
                                 <ToggleRow
                                     label="Developer mode"
