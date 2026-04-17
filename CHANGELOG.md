@@ -14,6 +14,14 @@ Initial public alpha preparation release.
 - Added app and extension diagnostics copy flows.
 - Added regression coverage for strategy classification and browser handoff behavior.
 
+## 0.1.0-alpha.3 - 2026-04-17
+
+Assisted browser setup and packaging update.
+
+- Added an in-app browser setup assistant from the status bar so users can open Chrome or Edge extension pages, open the bundled extension folder, paste extension IDs, and install the native bridge without PowerShell.
+- Bundled the Chromium extension assets and native host executable into Windows installer builds so extension setup can start from the installed app.
+- Added direct app-side native messaging registration for Chrome and Edge to reduce first-run setup failures.
+
 ## 0.1.0-alpha.2 - 2026-04-17
 
 Installer hardening and browser handoff safety update.

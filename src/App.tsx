@@ -19,6 +19,9 @@ const AddUrlModal = lazy(() =>
 const SettingsModal = lazy(() =>
   import("./components/SettingsModal").then((m) => ({ default: m.SettingsModal }))
 );
+const ExtensionSetupModal = lazy(() =>
+  import("./components/ExtensionSetupModal").then((m) => ({ default: m.ExtensionSetupModal }))
+);
 
 interface DownloadItem {
   id: string;
@@ -290,6 +293,7 @@ function App() {
   const [activeCategory, setActiveCategory] = useState("all");
   const [isAddUrlOpen, setIsAddUrlOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isExtensionSetupOpen, setIsExtensionSetupOpen] = useState(false);
   const [initialUrl, setInitialUrl] = useState("");
   const [initialHeaders, setInitialHeaders] = useState<Record<string, string> | undefined>(undefined);
   const [searchTerm, setSearchTerm] = useState("");
@@ -842,7 +846,11 @@ function App() {
   const handleOpenExtensionLink = useCallback(async (kind: "install" | "setup") => {
     const health = extensionHealth ?? (await refreshExtensionHealth());
     if (!health) return;
-    const url = kind === "install" ? health.install_url : health.setup_url;
+    if (kind === "install") {
+      setIsExtensionSetupOpen(true);
+      return;
+    }
+    const url = health.setup_url;
     try {
       await invoke("open_extension_setup_link", { url });
     } catch (error) {
@@ -942,6 +950,27 @@ function App() {
           <SettingsModal 
             isOpen={isSettingsOpen}
             onClose={() => setIsSettingsOpen(false)}
+          />
+        </Suspense>
+      )}
+      {isExtensionSetupOpen && (
+        <Suspense fallback={null}>
+          <ExtensionSetupModal
+            isOpen={isExtensionSetupOpen}
+            initialChromeId={
+              extensionHealth?.last_seen_browser?.toLowerCase().includes("chrome")
+                ? extensionHealth.last_seen_runtime_id
+                : undefined
+            }
+            initialEdgeId={
+              extensionHealth?.last_seen_browser?.toLowerCase().includes("edge")
+                ? extensionHealth.last_seen_runtime_id
+                : undefined
+            }
+            onClose={() => setIsExtensionSetupOpen(false)}
+            onInstalled={async () => {
+              await refreshExtensionHealth("Browser integration installed");
+            }}
           />
         </Suspense>
       )}
@@ -1116,12 +1145,12 @@ function App() {
                 onClick={() => handleOpenExtensionLink("setup")}
                 className="text-gray-400 hover:text-white transition-colors"
               >
-                Setup
+                Docs
               </button>
             </div>
             <div className="hidden text-gray-600 md:block">{extensionMetaLabel}</div>
             {extensionStatusMessage && <div className="text-gray-400">{extensionStatusMessage}</div>}
-            <div>VelocityDL v0.1.0-alpha.2</div>
+            <div>VelocityDL v0.1.0-alpha.3</div>
           </div>
         </div>
       </div>

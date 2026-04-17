@@ -9,7 +9,7 @@ use crate::protocols::strategy::{classify_media_strategy, MediaStrategy};
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, RANGE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -41,6 +41,24 @@ pub struct ExtensionHealthResponse {
     pub last_seen_runtime_id: Option<String>,
     pub status: String,
     pub status_label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BrowserIntegrationStatus {
+    pub extension_directory: Option<String>,
+    pub native_host_path: Option<String>,
+    pub chrome_available: bool,
+    pub edge_available: bool,
+    pub chrome_manifest_installed: bool,
+    pub edge_manifest_installed: bool,
+    pub docs_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BrowserIntegrationInstallResult {
+    pub message: String,
+    pub chrome_manifest_path: Option<String>,
+    pub edge_manifest_path: Option<String>,
 }
 
 #[cfg(windows)]
@@ -105,6 +123,156 @@ fn sanitize_filename(name: &str) -> String {
         "downloaded_media".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn validate_extension_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err("Extension ID is required".to_string());
+    }
+    if trimmed.len() != 32 || !trimmed.chars().all(|ch| ('a'..='p').contains(&ch)) {
+        return Err("Extension ID must be a 32-character Chromium extension ID".to_string());
+    }
+    Ok(trimmed)
+}
+
+#[cfg(windows)]
+fn find_browser_executable(browser: &str) -> Option<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+
+    let candidates = match browser {
+        "chrome" => vec![
+            local_app_data
+                .as_ref()
+                .map(|base| base.join("Google\\Chrome\\Application\\chrome.exe")),
+            program_files
+                .as_ref()
+                .map(|base| base.join("Google\\Chrome\\Application\\chrome.exe")),
+            program_files_x86
+                .as_ref()
+                .map(|base| base.join("Google\\Chrome\\Application\\chrome.exe")),
+        ],
+        "edge" => vec![
+            local_app_data
+                .as_ref()
+                .map(|base| base.join("Microsoft\\Edge\\Application\\msedge.exe")),
+            program_files
+                .as_ref()
+                .map(|base| base.join("Microsoft\\Edge\\Application\\msedge.exe")),
+            program_files_x86
+                .as_ref()
+                .map(|base| base.join("Microsoft\\Edge\\Application\\msedge.exe")),
+        ],
+        _ => Vec::new(),
+    };
+
+    candidates.into_iter().flatten().find(|path| path.exists())
+}
+
+#[cfg(not(windows))]
+fn find_browser_executable(_browser: &str) -> Option<PathBuf> {
+    None
+}
+
+fn native_manifest_output_dir() -> Result<PathBuf, String> {
+    let appdata = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "APPDATA is not available".to_string())?;
+    Ok(appdata.join("com.velocitydl.desktop").join("native-messaging"))
+}
+
+fn resolve_bundled_resource<R: Runtime>(app: &AppHandle<R>, relative_path: &str) -> Option<PathBuf> {
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join(relative_path))
+        .filter(|path| path.exists())
+}
+
+fn resolve_extension_directory<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = resolve_bundled_resource(app, "chromium-extension") {
+        candidates.push(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("resources").join("chromium-extension"));
+            candidates.push(parent.join("chromium-extension"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("chromium-extension"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists() && path.join("manifest.json").exists())
+}
+
+fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = resolve_bundled_resource(app, "native-host/vdl_native_host.exe") {
+        candidates.push(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("resources").join("native-host").join("vdl_native_host.exe"));
+            candidates.push(parent.join("vdl_native_host.exe"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("src-tauri").join("target").join("release").join("vdl_native_host.exe"));
+    }
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(windows)]
+fn write_native_manifest(
+    out_path: &Path,
+    host_exe_path: &Path,
+    extension_id: &str,
+    browser_prefix: &str,
+) -> Result<(), String> {
+    let manifest = serde_json::json!({
+        "name": "com.velocitydl.native_host",
+        "description": "VelocityDL Native Messaging Host",
+        "path": host_exe_path,
+        "type": "stdio",
+        "allowed_origins": [format!("{browser_prefix}-extension://{extension_id}/")],
+    });
+    let raw = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    std::fs::write(out_path, raw).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn set_native_messaging_registry_value(registry_key: &str, manifest_path: &Path) -> Result<(), String> {
+    use std::process::Command;
+
+    let status = Command::new("reg")
+        .args([
+            "add",
+            registry_key,
+            "/ve",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &manifest_path.to_string_lossy(),
+            "/f",
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to register native host at '{}'",
+            registry_key
+        ))
     }
 }
 
@@ -516,6 +684,126 @@ pub async fn get_extension_health<R: Runtime>(
         status,
         status_label,
     })
+}
+
+#[tauri::command]
+pub async fn get_browser_integration_status<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<BrowserIntegrationStatus, String> {
+    let manifest_dir = native_manifest_output_dir()?;
+    let chrome_manifest = manifest_dir.join("com.velocitydl.native_host.chrome.json");
+    let edge_manifest = manifest_dir.join("com.velocitydl.native_host.edge.json");
+
+    Ok(BrowserIntegrationStatus {
+        extension_directory: resolve_extension_directory(&app)
+            .map(|path| path.to_string_lossy().to_string()),
+        native_host_path: resolve_native_host_executable(&app)
+            .map(|path| path.to_string_lossy().to_string()),
+        chrome_available: find_browser_executable("chrome").is_some(),
+        edge_available: find_browser_executable("edge").is_some(),
+        chrome_manifest_installed: chrome_manifest.exists(),
+        edge_manifest_installed: edge_manifest.exists(),
+        docs_url: "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md"
+            .to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn open_browser_extensions_page<R: Runtime>(
+    _app: AppHandle<R>,
+    browser: String,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+
+        let browser_key = browser.trim().to_ascii_lowercase();
+        let browser_exe = find_browser_executable(&browser_key)
+            .ok_or_else(|| format!("{} is not installed on this PC", browser))?;
+        let extensions_url = match browser_key.as_str() {
+            "chrome" => "chrome://extensions",
+            "edge" => "edge://extensions",
+            _ => return Err("Unsupported browser".to_string()),
+        };
+
+        Command::new(browser_exe)
+            .arg("--new-window")
+            .arg(extensions_url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Browser-specific setup is only implemented on Windows right now".to_string())
+}
+
+#[tauri::command]
+pub async fn install_browser_integration<R: Runtime>(
+    app: AppHandle<R>,
+    chrome_extension_id: Option<String>,
+    edge_extension_id: Option<String>,
+) -> Result<BrowserIntegrationInstallResult, String> {
+    #[cfg(windows)]
+    {
+        let host_path = resolve_native_host_executable(&app)
+            .ok_or_else(|| "VelocityDL native host binary was not found in this build".to_string())?;
+
+        let chrome_id = match chrome_extension_id {
+            Some(value) if !value.trim().is_empty() => Some(validate_extension_id(&value)?),
+            _ => None,
+        };
+        let edge_id = match edge_extension_id {
+            Some(value) if !value.trim().is_empty() => Some(validate_extension_id(&value)?),
+            _ => None,
+        };
+
+        if chrome_id.is_none() && edge_id.is_none() {
+            return Err("Enter at least one browser extension ID before installing".to_string());
+        }
+
+        let manifest_dir = native_manifest_output_dir()?;
+        std::fs::create_dir_all(&manifest_dir).map_err(|e| e.to_string())?;
+
+        let mut installed = Vec::new();
+        let mut chrome_manifest_path = None;
+        let mut edge_manifest_path = None;
+
+        if let Some(chrome_id) = chrome_id {
+            let out_path = manifest_dir.join("com.velocitydl.native_host.chrome.json");
+            write_native_manifest(&out_path, &host_path, &chrome_id, "chrome")?;
+            set_native_messaging_registry_value(
+                r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host",
+                &out_path,
+            )?;
+            installed.push("Chrome");
+            chrome_manifest_path = Some(out_path.to_string_lossy().to_string());
+        }
+
+        if let Some(edge_id) = edge_id {
+            let out_path = manifest_dir.join("com.velocitydl.native_host.edge.json");
+            write_native_manifest(&out_path, &host_path, &edge_id, "chrome")?;
+            set_native_messaging_registry_value(
+                r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host",
+                &out_path,
+            )?;
+            installed.push("Edge");
+            edge_manifest_path = Some(out_path.to_string_lossy().to_string());
+        }
+
+        return Ok(BrowserIntegrationInstallResult {
+            message: format!(
+                "Native browser integration installed for {}",
+                installed.join(" and ")
+            ),
+            chrome_manifest_path,
+            edge_manifest_path,
+        });
+    }
+
+    #[allow(unreachable_code)]
+    Err("Browser integration install is only implemented on Windows right now".to_string())
 }
 
 #[tauri::command]

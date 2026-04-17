@@ -3,8 +3,9 @@ use crate::extractor::clipboard::start_clipboard_polling;
 use crate::extractor::native_bridge::{start_native_inbox_polling, ExtensionHealthState};
 use crate::ipc::commands::{
     ack_external_capture_request, add_download, fetch_metadata, get_app_diagnostics,
-    get_extension_health, get_settings, open_extension_setup_link, open_folder, pause_download,
-    save_settings, start_sniffing,
+    get_browser_integration_status, get_extension_health, get_settings, install_browser_integration,
+    open_browser_extensions_page, open_extension_setup_link, open_folder, pause_download, save_settings,
+    start_sniffing,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -130,10 +131,13 @@ pub fn run() {
             pause_download,
             get_settings,
             get_extension_health,
+            get_browser_integration_status,
             get_app_diagnostics,
             ack_external_capture_request,
             save_settings,
             fetch_metadata,
+            install_browser_integration,
+            open_browser_extensions_page,
             open_extension_setup_link,
             open_folder,
             start_sniffing
