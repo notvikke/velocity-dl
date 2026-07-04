@@ -1,9 +1,9 @@
 const takeoverToggle = document.getElementById("takeoverToggle");
 const menuToggle = document.getElementById("menuToggle");
-const scanPickerToggle = document.getElementById("scanPickerToggle");
+const scanModePicker = document.getElementById("scanModePicker");
 const takeoverState = document.getElementById("takeoverState");
 const menuState = document.getElementById("menuState");
-const scanPickerState = document.getElementById("scanPickerState");
+const scanModeState = document.getElementById("scanModeState");
 const scanBtn = document.getElementById("scanBtn");
 const copyDebugBtn = document.getElementById("copyDebugBtn");
 const nativeState = document.getElementById("nativeState");
@@ -16,7 +16,7 @@ const debugDetails = document.getElementById("debugDetails");
 const state = {
   takeoverAllDownloads: true,
   showContextMenu: true,
-  autoOpenQualityPickerOnScanCapture: true,
+  scanCaptureMode: "quality_picker",
   scanActive: false,
 };
 
@@ -26,6 +26,17 @@ function setToggle(btn, enabled, labelEl) {
   if (labelEl) {
     labelEl.textContent = enabled ? "On" : "Off";
     labelEl.style.color = enabled ? "#20c47a" : "#8f9cb0";
+  }
+}
+
+function setScanMode(mode) {
+  state.scanCaptureMode = mode === "current_stream" ? "current_stream" : "quality_picker";
+  if (scanModePicker) {
+    scanModePicker.value = state.scanCaptureMode;
+  }
+  if (scanModeState) {
+    scanModeState.textContent = state.scanCaptureMode === "quality_picker" ? "Picker" : "Stream";
+    scanModeState.style.color = state.scanCaptureMode === "quality_picker" ? "#20c47a" : "#8f9cb0";
   }
 }
 
@@ -65,6 +76,7 @@ function renderDebug(debug) {
     `resolvedUrl: ${debug.resolvedUrl || ""}`,
     `resolvedRawMediaUrl: ${debug.resolvedRawMediaUrl || ""}`,
     `usedRecentPlayable: ${debug.usedRecentPlayable ? "yes" : "no"}`,
+    `rejectionReason: ${debug.rejectionReason || ""}`,
     "",
     "topCandidates:",
     ...(Array.isArray(debug.topCandidates) && debug.topCandidates.length
@@ -88,7 +100,7 @@ async function buildDiagnosticsText() {
     `heartbeatMessage: ${stateResp?.heartbeat?.message || ""}`,
     `takeoverAllDownloads: ${!!state.takeoverAllDownloads}`,
     `showContextMenu: ${!!state.showContextMenu}`,
-    `autoOpenQualityPickerOnScanCapture: ${!!state.autoOpenQualityPickerOnScanCapture}`,
+    `scanCaptureMode: ${state.scanCaptureMode || "quality_picker"}`,
     "",
     "lastHeartbeat:",
     debugResp?.heartbeat
@@ -112,6 +124,7 @@ async function buildDiagnosticsText() {
           `resolvedUrl: ${debugResp.debug.resolvedUrl || ""}`,
           `resolvedRawMediaUrl: ${debugResp.debug.resolvedRawMediaUrl || ""}`,
           `usedRecentPlayable: ${debugResp.debug.usedRecentPlayable ? "yes" : "no"}`,
+          `rejectionReason: ${debugResp.debug.rejectionReason || ""}`,
           "topCandidates:",
           ...(Array.isArray(debugResp.debug.topCandidates) && debugResp.debug.topCandidates.length
             ? debugResp.debug.topCandidates.map(
@@ -134,12 +147,10 @@ async function loadState() {
 
   state.takeoverAllDownloads = !!resp.settings?.takeoverAllDownloads;
   state.showContextMenu = !!resp.settings?.showContextMenu;
-  state.autoOpenQualityPickerOnScanCapture =
-    resp.settings?.autoOpenQualityPickerOnScanCapture !== false;
+  setScanMode(resp.settings?.scanCaptureMode);
   state.scanActive = !!resp.scan?.active;
   setToggle(takeoverToggle, state.takeoverAllDownloads, takeoverState);
   setToggle(menuToggle, state.showContextMenu, menuState);
-  setToggle(scanPickerToggle, state.autoOpenQualityPickerOnScanCapture, scanPickerState);
   setScanButton(state.scanActive);
   runtimeId.textContent = `ID: ${resp.runtimeId || "unknown"}`;
 
@@ -160,7 +171,7 @@ async function saveState() {
     type: "vdl_popup_update_settings",
     takeoverAllDownloads: state.takeoverAllDownloads,
     showContextMenu: state.showContextMenu,
-    autoOpenQualityPickerOnScanCapture: state.autoOpenQualityPickerOnScanCapture,
+    scanCaptureMode: state.scanCaptureMode,
   });
   if (!resp?.ok) {
     setStatus("Failed to save settings", "warn");
@@ -182,9 +193,8 @@ menuToggle.addEventListener("click", async () => {
   await saveState();
 });
 
-scanPickerToggle.addEventListener("click", async () => {
-  state.autoOpenQualityPickerOnScanCapture = !state.autoOpenQualityPickerOnScanCapture;
-  setToggle(scanPickerToggle, state.autoOpenQualityPickerOnScanCapture);
+scanModePicker?.addEventListener("change", async () => {
+  setScanMode(scanModePicker.value);
   await saveState();
 });
 

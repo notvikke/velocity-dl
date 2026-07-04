@@ -39,6 +39,10 @@ struct NativeMessage {
     request_id: Option<String>,
     #[serde(default)]
     wait_for_ack: Option<bool>,
+    #[serde(default)]
+    original_url: Option<String>,
+    #[serde(default)]
+    browser_confidence: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -51,6 +55,8 @@ struct NativeResponse {
     browser_takeover_all_downloads: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     accepted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_class: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +72,7 @@ struct CaptureAckPayload {
     request_id: String,
     accepted: bool,
     message: String,
+    route_class: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -211,6 +218,7 @@ fn main() -> Result<(), String> {
                 accept_browser_download_requests: None,
                 browser_takeover_all_downloads: None,
                 accepted: None,
+                route_class: None,
             })?;
             continue;
         }
@@ -223,6 +231,7 @@ fn main() -> Result<(), String> {
                     accept_browser_download_requests: None,
                     browser_takeover_all_downloads: None,
                     accepted: Some(false),
+                    route_class: None,
                 })?;
                 continue;
             }
@@ -233,6 +242,7 @@ fn main() -> Result<(), String> {
                 accept_browser_download_requests: Some(prefs.accept_browser_download_requests),
                 browser_takeover_all_downloads: Some(prefs.browser_takeover_all_downloads),
                 accepted: None,
+                route_class: None,
             })?;
             continue;
         }
@@ -245,6 +255,7 @@ fn main() -> Result<(), String> {
                     accept_browser_download_requests: None,
                     browser_takeover_all_downloads: None,
                     accepted: Some(false),
+                    route_class: None,
                 })?;
                 continue;
             }
@@ -260,6 +271,7 @@ fn main() -> Result<(), String> {
                     accept_browser_download_requests: None,
                     browser_takeover_all_downloads: None,
                     accepted: Some(false),
+                    route_class: None,
                 })?;
                 continue;
             }
@@ -277,6 +289,7 @@ fn main() -> Result<(), String> {
                             accept_browser_download_requests: None,
                             browser_takeover_all_downloads: None,
                             accepted: Some(ack.accepted),
+                            route_class: ack.route_class,
                         })?;
                     }
                     None => {
@@ -286,6 +299,7 @@ fn main() -> Result<(), String> {
                             accept_browser_download_requests: None,
                             browser_takeover_all_downloads: None,
                             accepted: Some(false),
+                            route_class: None,
                         })?;
                     }
                 }
@@ -297,6 +311,7 @@ fn main() -> Result<(), String> {
                 accept_browser_download_requests: None,
                 browser_takeover_all_downloads: None,
                 accepted: None,
+                route_class: None,
             })?;
             continue;
         }
@@ -308,8 +323,9 @@ fn main() -> Result<(), String> {
                     message: "VelocityDL app is not running".to_string(),
                     accept_browser_download_requests: None,
                     browser_takeover_all_downloads: None,
-                    accepted: Some(false),
-                })?;
+                accepted: Some(false),
+                route_class: None,
+            })?;
                 continue;
             }
             append_to_inbox(&message)?;
@@ -319,6 +335,7 @@ fn main() -> Result<(), String> {
                 accept_browser_download_requests: None,
                 browser_takeover_all_downloads: None,
                 accepted: None,
+                route_class: None,
             })?;
             continue;
         }
@@ -329,6 +346,7 @@ fn main() -> Result<(), String> {
             accept_browser_download_requests: None,
             browser_takeover_all_downloads: None,
             accepted: Some(false),
+            route_class: None,
         })?;
     }
     Ok(())

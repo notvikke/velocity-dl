@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
-pub const APP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
+pub const APP_USER_AGENT: &str = crate::request_context::DEFAULT_USER_AGENT;
 const MAX_SEGMENT_RETRIES: usize = 5;
 const SEGMENT_STALL_TIMEOUT: Duration = Duration::from_secs(25);
 const RETRY_BASE_DELAY_MS: u64 = 1200;
@@ -189,10 +189,12 @@ impl Downloader {
             return Err(anyhow::anyhow!(err_msg));
         }
 
+        let truncate_existing = should_truncate_segment_output(self.total_size, segment_index);
         let file = OpenOptions::new()
             .create(true)
             .write(true)
-            .append(true)
+            .append(!truncate_existing)
+            .truncate(truncate_existing)
             .open(&temp_path)
             .await
             .with_context(|| format!("Failed to open temp file: {:?}", temp_path))?;
@@ -243,4 +245,24 @@ fn segment_part_path(base_path: &PathBuf, segment_index: usize) -> Result<PathBu
         .ok_or_else(|| anyhow!("Invalid output path (missing file name): {:?}", base_path))?
         .to_string_lossy();
     Ok(base_path.with_file_name(format!("{file_name}.vdl-part{segment_index}")))
+}
+
+fn should_truncate_segment_output(total_size: u64, segment_index: usize) -> bool {
+    total_size == 0 && segment_index == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_truncate_segment_output;
+
+    #[test]
+    fn unknown_size_single_stream_starts_from_clean_file() {
+        assert!(should_truncate_segment_output(0, 0));
+    }
+
+    #[test]
+    fn ranged_segment_downloads_keep_append_resume_behavior() {
+        assert!(!should_truncate_segment_output(1024, 0));
+        assert!(!should_truncate_segment_output(1024, 1));
+    }
 }

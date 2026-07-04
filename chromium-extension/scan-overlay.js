@@ -285,6 +285,54 @@
     schedulePositionUpdate();
   }
 
+  function visibleMediaScore(media) {
+    if (!media?.isConnected) return -1;
+    const rect = media.getBoundingClientRect();
+    if (rect.width < 120 || rect.height < 80 || rect.bottom <= 0 || rect.right <= 0) {
+      return -1;
+    }
+
+    const area = rect.width * rect.height;
+    let score = area;
+
+    if (!media.paused) score += 50000;
+    if (media.currentTime > 0) score += 20000;
+    if (media.muted) score -= 5000;
+    if (rect.top >= 0 && rect.left >= 0) score += 5000;
+
+    return score;
+  }
+
+  function pickPrimaryMedia(mediaNodes) {
+    let best = null;
+    let bestScore = -1;
+
+    for (const media of mediaNodes) {
+      const score = visibleMediaScore(media);
+      if (score > bestScore) {
+        best = media;
+        bestScore = score;
+      }
+    }
+
+    return best;
+  }
+
+  function syncPrimaryMediaButton(primaryMedia) {
+    for (const [media, btn] of STATE.map.entries()) {
+      if (media !== primaryMedia || !media.isConnected) {
+        btn.remove();
+        STATE.map.delete(media);
+      }
+    }
+
+    if (!primaryMedia) {
+      return;
+    }
+
+    createButtonForMedia(primaryMedia);
+  }
+
   function ensurePageCaptureButton() {
     if (STATE.pageButton?.isConnected) return;
 
@@ -366,12 +414,20 @@
     if (!STATE.active) return;
     const mediaNodes = [];
     collectMediaElementsFromRoot(document, mediaNodes);
-    mediaNodes.forEach((media) => {
-      createButtonForMedia(media);
-    });
-    ensurePageCaptureButton();
+    const primaryMedia = pickPrimaryMedia(mediaNodes);
+    syncPrimaryMediaButton(primaryMedia);
+
+    if (primaryMedia) {
+      if (STATE.pageButton) {
+        STATE.pageButton.remove();
+        STATE.pageButton = null;
+      }
+    } else {
+      ensurePageCaptureButton();
+    }
+
     if (STATE.pageButton) {
-      STATE.pageButton.style.opacity = mediaNodes.length ? "0.46" : "0.72";
+      STATE.pageButton.style.opacity = "0.72";
     }
     schedulePositionUpdate();
   }

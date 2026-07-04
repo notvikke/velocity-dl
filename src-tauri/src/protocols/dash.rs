@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
+
+const FFMPEG_PROGRESS_STALL_TIMEOUT: Duration = Duration::from_secs(45);
+const STDERR_TAIL_LINES: usize = 24;
 
 #[derive(Debug, Clone)]
 pub struct DashProgress {
@@ -11,6 +16,15 @@ pub struct DashProgress {
     pub out_time_ms: Option<u64>,
     pub speed_factor: Option<String>,
 }
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut tokio::process::Command) {
+    use std::os::windows::process::CommandExt;
+    command.as_std_mut().creation_flags(0x08000000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut tokio::process::Command) {}
 
 pub async fn probe_duration_seconds(
     ffmpeg_path: &PathBuf,
@@ -31,6 +45,7 @@ pub async fn probe_duration_seconds(
     };
 
     let mut command = tokio::process::Command::new(executable);
+    hide_console_window(&mut command);
     command
         .arg("-v")
         .arg("error")
@@ -39,7 +54,7 @@ pub async fn probe_duration_seconds(
         .arg("-of")
         .arg("default=noprint_wrappers=1:nokey=1");
 
-    if let Some(headers_arg) = build_ffmpeg_headers(headers) {
+    if let Some(headers_arg) = crate::request_context::build_ffmpeg_header_blob(headers) {
         command.arg("-headers").arg(headers_arg);
     }
 
@@ -62,6 +77,7 @@ pub async fn download_mpd(
     mut on_progress: impl FnMut(DashProgress) + Send,
 ) -> Result<()> {
     let mut command = tokio::process::Command::new(ffmpeg_path);
+    hide_console_window(&mut command);
     command
         .arg("-progress")
         .arg("pipe:1")
@@ -70,7 +86,7 @@ pub async fn download_mpd(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if let Some(headers_arg) = build_ffmpeg_headers(headers) {
+    if let Some(headers_arg) = crate::request_context::build_ffmpeg_header_blob(headers) {
         command.arg("-headers").arg(headers_arg);
     }
 
@@ -86,13 +102,58 @@ pub async fn download_mpd(
         .stdout
         .take()
         .ok_or_else(|| anyhow!("FFmpeg stdout pipe unavailable for DASH progress"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("FFmpeg stderr pipe unavailable for DASH progress"))?;
     let mut reader = BufReader::new(stdout).lines();
+    let stderr_tail = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_tail_task = stderr_tail.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr_reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut tail = stderr_tail_task.lock().await;
+            tail.push(trimmed.to_string());
+            if tail.len() > STDERR_TAIL_LINES {
+                let drain_count = tail.len() - STDERR_TAIL_LINES;
+                tail.drain(0..drain_count);
+            }
+        }
+    });
     let mut current_total_size = None;
     let mut current_out_time_ms = None;
     let mut current_speed_factor = None;
     let mut last_emit = Instant::now();
 
-    while let Some(line) = reader.next_line().await? {
+    loop {
+        let next_line = timeout(FFMPEG_PROGRESS_STALL_TIMEOUT, reader.next_line()).await;
+        let Some(line) = (match next_line {
+            Ok(line) => line?,
+            Err(_) => {
+                let stderr_snapshot = {
+                    let tail = stderr_tail.lock().await;
+                    if tail.is_empty() {
+                        "(no stderr output captured)".to_string()
+                    } else {
+                        tail.join(" | ")
+                    }
+                };
+                let _ = child.kill().await;
+                let _ = stderr_task.await;
+                return Err(anyhow!(
+                    "FFmpeg DASH download stalled for {}s. stderr tail: {}",
+                    FFMPEG_PROGRESS_STALL_TIMEOUT.as_secs(),
+                    stderr_snapshot
+                ));
+            }
+        }) else {
+            break;
+        };
+
         if let Some((key, value)) = line.split_once('=') {
             match key {
                 "total_size" => {
@@ -120,62 +181,22 @@ pub async fn download_mpd(
     }
 
     let output = child.wait_with_output().await?;
+    let _ = stderr_task.await;
 
     if !output.status.success() {
+        let stderr_snapshot = {
+            let tail = stderr_tail.lock().await;
+            if tail.is_empty() {
+                String::from_utf8_lossy(&output.stderr).to_string()
+            } else {
+                tail.join(" | ")
+            }
+        };
         return Err(anyhow!(
             "FFmpeg DASH download failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            stderr_snapshot
         ));
     }
 
     Ok(())
-}
-
-fn build_ffmpeg_headers(headers: Option<&HashMap<String, String>>) -> Option<String> {
-    let mut lines = Vec::new();
-    let mut has_user_agent = false;
-    let mut has_origin = false;
-    let mut referer_value: Option<String> = None;
-
-    for (key, value) in headers? {
-        let key = key.trim();
-        let value = value.trim();
-        if key.is_empty() || value.is_empty() {
-            continue;
-        }
-        if key.eq_ignore_ascii_case("X-VDL-Raw-Media-Url") {
-            continue;
-        }
-        if key.eq_ignore_ascii_case("User-Agent") {
-            has_user_agent = true;
-        }
-        if key.eq_ignore_ascii_case("Origin") {
-            has_origin = true;
-        }
-        if key.eq_ignore_ascii_case("Referer") {
-            referer_value = Some(value.to_string());
-        }
-        lines.push(format!("{key}: {value}"));
-    }
-
-    if !has_origin {
-        if let Some(referer) = referer_value {
-            if let Ok(parsed) = url::Url::parse(&referer) {
-                lines.push(format!("Origin: {}", parsed.origin().ascii_serialization()));
-            }
-        }
-    }
-
-    if !has_user_agent {
-        lines.push(format!(
-            "User-Agent: {}",
-            crate::engine::downloader::APP_USER_AGENT
-        ));
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(format!("{}\r\n", lines.join("\r\n")))
-    }
 }

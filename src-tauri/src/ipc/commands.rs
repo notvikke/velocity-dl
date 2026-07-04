@@ -13,8 +13,9 @@ use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, RANGE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_opener::OpenerExt;
+use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DownloadItem {
@@ -32,6 +33,12 @@ pub struct DownloadItem {
     pub headers: Option<HashMap<String, String>>,
     pub audio_headers: Option<HashMap<String, String>>,
     pub download_strategy: Option<String>,
+    pub download_origin: Option<String>,
+    pub browser_source: Option<String>,
+    pub browser_confidence: Option<String>,
+    pub browser_request_id: Option<String>,
+    pub original_url: Option<String>,
+    pub referrer: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -86,6 +93,34 @@ pub struct ToolStatusResponse {
     pub update_available: bool,
     pub update_supported: bool,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
+struct DownloadAttemptEvent {
+    session_id: String,
+    step_id: String,
+    label: String,
+    status: AttemptStatus,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum AttemptStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+fn strategy_hint_to_media_strategy(hint: Option<&str>) -> Option<MediaStrategy> {
+    match hint.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "direct_file" => Some(MediaStrategy::DirectFile),
+        "hls_manifest" => Some(MediaStrategy::HlsManifest),
+        "dash_manifest" => Some(MediaStrategy::DashManifest),
+        "metadata_extractor" => Some(MediaStrategy::MetadataExtractor),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -171,6 +206,35 @@ fn map_tool_status(status: binaries::ToolStatus) -> ToolStatusResponse {
         update_supported: status.update_supported,
         last_error: status.last_error,
     }
+}
+
+fn emit_download_attempt<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: Option<&str>,
+    step_id: &str,
+    label: impl Into<String>,
+    status: AttemptStatus,
+    detail: Option<String>,
+) {
+    let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+
+    let _ = app.emit(
+        "download_attempt",
+        DownloadAttemptEvent {
+            session_id: session_id.to_string(),
+            step_id: step_id.to_string(),
+            label: label.into(),
+            status,
+            detail,
+        },
+    );
+}
+
+async fn auth_cookie_header<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let auth_manager = app.try_state::<crate::auth::store::AuthManager>()?;
+    auth_manager.get_cookies_as_header().await
 }
 
 fn validate_extension_id(value: &str) -> Result<String, String> {
@@ -583,25 +647,121 @@ fn filename_from_content_disposition(value: &str) -> Option<String> {
     }
 }
 
-async fn probe_direct_media_metadata(
+fn is_server_script_extension(ext: &str) -> bool {
+    matches!(
+        ext.trim().to_ascii_lowercase().as_str(),
+        "php" | "asp" | "aspx" | "jsp" | "cgi" | "cfm" | "do" | "action"
+    )
+}
+
+fn has_trustworthy_filename_hint(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+
+    Path::new(value)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| !is_server_script_extension(ext))
+        .unwrap_or(false)
+}
+
+fn strategy_from_detected_ext(ext: &str) -> MediaStrategy {
+    match ext.trim().to_ascii_lowercase().as_str() {
+        "m3u8" => MediaStrategy::HlsManifest,
+        "mpd" => MediaStrategy::DashManifest,
+        _ => MediaStrategy::DirectFile,
+    }
+}
+
+fn resolve_title_from_hints(
+    url: &str,
+    provided_title: Option<&str>,
+    detected_filename: Option<&str>,
+    detected_ext: Option<&str>,
+    strategy: MediaStrategy,
+) -> String {
+    let manifest_ext = extension_from_path_like(url).filter(|ext| ext == "m3u8" || ext == "mpd");
+    let mut base = sanitize_filename(
+        provided_title
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| url.split('/').next_back().unwrap_or("downloaded_media")),
+    );
+
+    if let Some(ext) = Path::new(&base)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    {
+        if manifest_ext.is_some() && (ext == "m3u8" || ext == "mpd") {
+            let stem = Path::new(&base)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("stream_capture");
+            return format!("{}.mp4", sanitize_filename(stem));
+        }
+
+        if !is_server_script_extension(&ext) {
+            return base;
+        }
+
+        if let Some(stem) = Path::new(&base).file_stem().and_then(|s| s.to_str()) {
+            base = sanitize_filename(stem);
+        }
+    }
+
+    if let Some(ext) = manifest_ext {
+        let stem = if base == "browser_capture" || base == "downloaded_media" {
+            "stream_capture".to_string()
+        } else {
+            base
+        };
+        let output_ext = if ext == "mpd" || matches!(strategy, MediaStrategy::DashManifest) {
+            "mp4"
+        } else {
+            "mp4"
+        };
+        return format!("{stem}.{output_ext}");
+    }
+
+    if let Some(filename) = detected_filename {
+        let safe = sanitize_filename(filename);
+        if Path::new(&safe).extension().is_some() {
+            return safe;
+        }
+        if base == "browser_capture" || base == "downloaded_media" || Path::new(&base).extension().is_some() {
+            base = safe;
+        }
+    }
+
+    if let Some(ext) = detected_ext {
+        return format!("{base}.{ext}");
+    }
+
+    if let Some(ext) = extension_from_path_like(url) {
+        if !is_server_script_extension(&ext) {
+            return format!("{base}.{ext}");
+        }
+    }
+
+    base
+}
+
+async fn probe_direct_media_metadata<R: Runtime>(
+    app: &AppHandle<R>,
     url: &str,
     headers: Option<&HashMap<String, String>>,
 ) -> Option<ytdlp::YtDlpMetadata> {
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+        .user_agent(crate::request_context::DEFAULT_USER_AGENT)
+        .timeout(Duration::from_secs(20))
         .build()
         .ok()?;
 
-    let mut req_headers = HashMap::new();
-    req_headers.insert(
-        "User-Agent".to_string(),
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36".to_string(),
+    let req_headers = crate::request_context::merge_request_headers(
+        headers,
+        auth_cookie_header(app).await.as_deref(),
     );
-    if let Some(extra) = headers {
-        for (k, v) in extra {
-            req_headers.insert(k.clone(), v.clone());
-        }
-    }
 
     let mut req = client.get(url).header(RANGE, "bytes=0-0");
     for (k, v) in &req_headers {
@@ -686,20 +846,25 @@ async fn probe_direct_media_metadata(
     })
 }
 
-async fn detect_remote_file_hints(
+async fn detect_remote_file_hints<R: Runtime>(
+    app: &AppHandle<R>,
     url: &str,
     headers: Option<&HashMap<String, String>>,
 ) -> (Option<String>, Option<String>, Option<u64>) {
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+        .user_agent(crate::request_context::DEFAULT_USER_AGENT)
+        .timeout(Duration::from_secs(20))
         .build()
         .unwrap_or_default();
 
+    let request_headers = crate::request_context::merge_request_headers(
+        headers,
+        auth_cookie_header(app).await.as_deref(),
+    );
+
     let apply_headers = |mut req: reqwest::RequestBuilder| {
-        if let Some(extra) = headers {
-            for (k, v) in extra {
-                req = req.header(k, v);
-            }
+        for (k, v) in &request_headers {
+            req = req.header(k, v);
         }
         req
     };
@@ -761,75 +926,39 @@ async fn detect_remote_file_hints(
     (filename, ext, size)
 }
 
-async fn resolve_download_hints(
+async fn resolve_download_hints<R: Runtime>(
+    app: &AppHandle<R>,
     url: &str,
     provided_title: Option<String>,
     headers: Option<&HashMap<String, String>>,
+    browser_source: Option<&str>,
 ) -> (String, Option<u64>) {
     let strategy = classify_media_strategy(url);
-    let manifest_ext = extension_from_path_like(url).filter(|ext| ext == "m3u8" || ext == "mpd");
-    let mut base = sanitize_filename(
-        provided_title
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| url.split('/').next_back().unwrap_or("downloaded_media")),
-    );
-
-    if let Some(ext) = Path::new(&base)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
+    if browser_source == Some("chromium-downloads-api")
+        && has_trustworthy_filename_hint(provided_title.as_deref())
     {
-        if manifest_ext.is_some() && (ext == "m3u8" || ext == "mpd") {
-            let stem = Path::new(&base)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("stream_capture");
-            return (format!("{}.mp4", sanitize_filename(stem)), None);
-        }
-        return (base, None);
+        return (
+            resolve_title_from_hints(url, provided_title.as_deref(), None, None, strategy),
+            None,
+        );
     }
-
-    if let Some(ext) = manifest_ext {
-        let stem = if base == "browser_capture" || base == "downloaded_media" {
-            "stream_capture".to_string()
-        } else {
-            base
-        };
-        let output_ext = if ext == "mpd" || matches!(strategy, MediaStrategy::DashManifest) {
-            "mp4"
-        } else {
-            "mp4"
-        };
-        return (format!("{stem}.{output_ext}"), None);
-    }
-
-    if let Some(ext) = extension_from_path_like(url) {
-        return (format!("{base}.{ext}"), None);
-    }
-
-    let (detected_filename, detected_ext, detected_size) = detect_remote_file_hints(url, headers).await;
-
-    if let Some(filename) = detected_filename {
-        let safe = sanitize_filename(&filename);
-        if Path::new(&safe).extension().is_some() {
-            return (safe, detected_size);
-        }
-        if base == "browser_capture" || base == "downloaded_media" {
-            base = safe;
-        }
-    }
-
-    if let Some(ext) = detected_ext {
-        return (format!("{base}.{ext}"), detected_size);
-    }
-
-    (base, detected_size)
+    let (detected_filename, detected_ext, detected_size) =
+        detect_remote_file_hints(app, url, headers).await;
+    (
+        resolve_title_from_hints(
+            url,
+            provided_title.as_deref(),
+            detected_filename.as_deref(),
+            detected_ext.as_deref(),
+            strategy,
+        ),
+        detected_size,
+    )
 }
 
 #[tauri::command]
 pub async fn get_settings<R: Runtime>(app: AppHandle<R>) -> Result<AppSettings, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = crate::pathing::config_dir_for_app(&app)?;
     Ok(AppSettings::load(config_dir).await)
 }
 
@@ -848,7 +977,7 @@ pub async fn get_extension_health<R: Runtime>(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let settings = AppSettings::load(app.path().app_config_dir().map_err(|e| e.to_string())?).await;
+    let settings = AppSettings::load(crate::pathing::config_dir_for_app(&app)?).await;
 
     let (status, status_label) = match snapshot.last_heartbeat_at_ms {
         Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_FRESH_MS => (
@@ -1094,8 +1223,9 @@ pub async fn ack_external_capture_request<R: Runtime>(
     request_id: String,
     accepted: bool,
     message: Option<String>,
+    route_class: Option<String>,
 ) -> Result<(), String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = crate::pathing::config_dir_for_app(&app)?;
     write_capture_ack(
         &config_dir,
         &CaptureAckPayload {
@@ -1108,6 +1238,7 @@ pub async fn ack_external_capture_request<R: Runtime>(
                     "rejected".to_string()
                 }
             }),
+            route_class,
         },
     )
     .await
@@ -1121,11 +1252,22 @@ pub async fn set_external_capture_listener_ready<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn reveal_main_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn save_settings<R: Runtime>(
     app: AppHandle<R>,
     settings: AppSettings,
 ) -> Result<(), String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = crate::pathing::config_dir_for_app(&app)?;
     apply_launch_on_startup(settings.launch_on_startup)?;
     settings.save(config_dir).await.map_err(|e| e.to_string())
 }
@@ -1135,28 +1277,99 @@ pub async fn fetch_metadata<R: Runtime>(
     app: AppHandle<R>,
     url: String,
     headers: Option<HashMap<String, String>>,
+    attempt_session_id: Option<String>,
 ) -> Result<ytdlp::YtDlpMetadata, String> {
+    let merged_headers =
+        crate::request_context::merge_request_headers(headers.as_ref(), auth_cookie_header(&app).await.as_deref());
     // Step 1: probe direct media first (works for many pasted links even without file extension).
-    if let Some(direct) = probe_direct_media_metadata(&url, headers.as_ref()).await {
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "direct_probe",
+        "Probe direct media response",
+        AttemptStatus::Running,
+        None,
+    );
+    if let Some(direct) = probe_direct_media_metadata(&app, &url, Some(&merged_headers)).await {
+        emit_download_attempt(
+            &app,
+            attempt_session_id.as_deref(),
+            "direct_probe",
+            "Probe direct media response",
+            AttemptStatus::Succeeded,
+            Some(format!("Resolved as direct {}", direct.ext)),
+        );
         return Ok(direct);
     }
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "direct_probe",
+        "Probe direct media response",
+        AttemptStatus::Failed,
+        Some("Response did not validate as direct media".to_string()),
+    );
 
     // Step 2: fallback to yt-dlp for page URLs / extractor-supported sites.
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "resolve_ytdlp",
+        "Resolve yt-dlp binary",
+        AttemptStatus::Running,
+        None,
+    );
     let ytdlp_path = binaries::ensure_ytdlp(&app)
         .await
         .map_err(|e| e.to_string())?;
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "resolve_ytdlp",
+        "Resolve yt-dlp binary",
+        AttemptStatus::Succeeded,
+        Some(ytdlp_path.display().to_string()),
+    );
+    let config_dir = crate::pathing::config_dir_for_app(&app)?;
 
-    // Run yt-dlp in a blocking task to avoid stalling the async runtime
     let url_clone = url.clone();
     let path_clone = ytdlp_path.clone();
     let config_clone = config_dir.clone();
-    let headers_clone = headers.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        ytdlp::get_metadata(&path_clone, &config_clone, &url_clone, headers_clone)
-    })
-        .await
-        .map_err(|e| e.to_string())?;
+    let headers_clone = Some(merged_headers.clone());
+    let app_for_attempts = app.clone();
+    let attempt_id_for_attempts = attempt_session_id.clone();
+    let result = timeout(
+        Duration::from_secs(45),
+        tokio::task::spawn_blocking(move || {
+            let mut on_strategy = |label: &str,
+                                   state: ytdlp::StrategyAttemptState,
+                                   detail: Option<&str>| {
+                let status = match state {
+                    ytdlp::StrategyAttemptState::Running => AttemptStatus::Running,
+                    ytdlp::StrategyAttemptState::Succeeded => AttemptStatus::Succeeded,
+                    ytdlp::StrategyAttemptState::Failed => AttemptStatus::Failed,
+                };
+                emit_download_attempt(
+                    &app_for_attempts,
+                    attempt_id_for_attempts.as_deref(),
+                    &format!("ytdlp_strategy:{}", label.to_ascii_lowercase().replace(' ', "_")),
+                    format!("yt-dlp strategy: {label}"),
+                    status,
+                    detail.map(|value| value.to_string()),
+                );
+            };
+            ytdlp::get_metadata(
+                &path_clone,
+                &config_clone,
+                &url_clone,
+                headers_clone,
+                &mut on_strategy,
+            )
+        }),
+    )
+    .await
+    .map_err(|_| "yt-dlp metadata attempt timed out after 45 seconds".to_string())?
+    .map_err(|e| e.to_string())?;
 
     match result {
         Ok(metadata) => Ok(metadata),
@@ -1166,7 +1379,23 @@ pub async fn fetch_metadata<R: Runtime>(
                 "yt-dlp metadata fetch failed, forcing update and retrying: {}",
                 first_err
             );
+            emit_download_attempt(
+                &app,
+                attempt_session_id.as_deref(),
+                "update_ytdlp",
+                "Update yt-dlp and retry",
+                AttemptStatus::Running,
+                Some(first_err.to_string()),
+            );
             if let Ok(()) = binaries::update_ytdlp(&app).await {
+                emit_download_attempt(
+                    &app,
+                    attempt_session_id.as_deref(),
+                    "update_ytdlp",
+                    "Update yt-dlp and retry",
+                    AttemptStatus::Succeeded,
+                    None,
+                );
                 let refreshed_ytdlp_path = binaries::ensure_ytdlp(&app)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -1174,10 +1403,42 @@ pub async fn fetch_metadata<R: Runtime>(
                 let path_retry = refreshed_ytdlp_path;
                 let config_retry = config_dir.clone();
                 let headers_retry = headers.clone();
-                let retry_result = tokio::task::spawn_blocking(move || {
-                    ytdlp::get_metadata(&path_retry, &config_retry, &url_retry, headers_retry)
-                })
+                let app_for_retry_attempts = app.clone();
+                let attempt_id_for_retry = attempt_session_id.clone();
+                let retry_result = timeout(
+                    Duration::from_secs(45),
+                    tokio::task::spawn_blocking(move || {
+                        let mut on_strategy = |label: &str,
+                                               state: ytdlp::StrategyAttemptState,
+                                               detail: Option<&str>| {
+                            let status = match state {
+                                ytdlp::StrategyAttemptState::Running => AttemptStatus::Running,
+                                ytdlp::StrategyAttemptState::Succeeded => AttemptStatus::Succeeded,
+                                ytdlp::StrategyAttemptState::Failed => AttemptStatus::Failed,
+                            };
+                            emit_download_attempt(
+                                &app_for_retry_attempts,
+                                attempt_id_for_retry.as_deref(),
+                                &format!(
+                                    "retry_ytdlp_strategy:{}",
+                                    label.to_ascii_lowercase().replace(' ', "_")
+                                ),
+                                format!("yt-dlp retry strategy: {label}"),
+                                status,
+                                detail.map(|value| value.to_string()),
+                            );
+                        };
+                        ytdlp::get_metadata(
+                            &path_retry,
+                            &config_retry,
+                            &url_retry,
+                            headers_retry,
+                            &mut on_strategy,
+                        )
+                    }),
+                )
                 .await
+                .map_err(|_| "yt-dlp retry timed out after 45 seconds".to_string())?
                 .map_err(|e| e.to_string())?;
 
                 match retry_result {
@@ -1186,16 +1447,32 @@ pub async fn fetch_metadata<R: Runtime>(
                         // Step 3: final fallback to direct probe in case extractor failed
                         // but URL resolves to media bytes.
                         if let Some(direct) =
-                            probe_direct_media_metadata(&url, headers.as_ref()).await
+                            probe_direct_media_metadata(&app, &url, Some(&merged_headers)).await
                         {
                             Ok(direct)
                         } else {
+                            emit_download_attempt(
+                                &app,
+                                attempt_session_id.as_deref(),
+                                "update_ytdlp",
+                                "Update yt-dlp and retry",
+                                AttemptStatus::Failed,
+                                Some(retry_err.to_string()),
+                            );
                             Err(retry_err.to_string())
                         }
                     }
                 }
             } else {
-                if let Some(direct) = probe_direct_media_metadata(&url, headers.as_ref()).await {
+                emit_download_attempt(
+                    &app,
+                    attempt_session_id.as_deref(),
+                    "update_ytdlp",
+                    "Update yt-dlp and retry",
+                    AttemptStatus::Failed,
+                    Some("Auto-update failed".to_string()),
+                );
+                if let Some(direct) = probe_direct_media_metadata(&app, &url, Some(&merged_headers)).await {
                     Ok(direct)
                 } else {
                     Err(first_err.to_string())
@@ -1218,10 +1495,95 @@ pub async fn add_download<R: Runtime>(
     audio_size: Option<u64>,
     headers: Option<HashMap<String, String>>,
     audio_headers: Option<HashMap<String, String>>,
+    attempt_session_id: Option<String>,
+    strategy_hint: Option<String>,
+    download_origin: Option<String>,
+    browser_source: Option<String>,
+    browser_confidence: Option<String>,
+    browser_request_id: Option<String>,
+    original_url: Option<String>,
+    referrer: Option<String>,
 ) -> Result<DownloadItem, String> {
     let id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let strategy = classify_media_strategy(&url);
-    let (final_title, detected_size) = resolve_download_hints(&url, title, headers.as_ref()).await;
+    let merged_probe_headers =
+        crate::request_context::merge_request_headers(headers.as_ref(), auth_cookie_header(&app).await.as_deref());
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "classify_strategy",
+        "Classify download strategy",
+        AttemptStatus::Running,
+        None,
+    );
+    let mut strategy = strategy_hint_to_media_strategy(strategy_hint.as_deref())
+        .unwrap_or_else(|| classify_media_strategy(&url));
+    if audio_url.is_none() && matches!(strategy, MediaStrategy::MetadataExtractor) {
+        emit_download_attempt(
+            &app,
+            attempt_session_id.as_deref(),
+            "validate_direct_url",
+            "Validate queued URL as downloadable media",
+            AttemptStatus::Running,
+            None,
+        );
+        if let Some(direct) = probe_direct_media_metadata(&app, &url, Some(&merged_probe_headers)).await {
+            strategy = strategy_from_detected_ext(&direct.ext);
+            emit_download_attempt(
+                &app,
+                attempt_session_id.as_deref(),
+                "validate_direct_url",
+                "Validate queued URL as downloadable media",
+                AttemptStatus::Succeeded,
+                Some(format!("Detected direct {}", direct.ext)),
+            );
+        } else {
+            emit_download_attempt(
+                &app,
+                attempt_session_id.as_deref(),
+                "validate_direct_url",
+                "Validate queued URL as downloadable media",
+                AttemptStatus::Failed,
+                Some("URL behaved like a page, not a direct file".to_string()),
+            );
+            return Err(
+                "This URL behaved like a web page instead of a direct downloadable file. Open the metadata picker and let VelocityDL try extractor strategies."
+                    .to_string(),
+            );
+        }
+    }
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "classify_strategy",
+        "Classify download strategy",
+        AttemptStatus::Succeeded,
+        Some(strategy.as_str().to_string()),
+    );
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "resolve_title",
+        "Resolve output filename",
+        AttemptStatus::Running,
+        None,
+    );
+    let (final_title, detected_size) =
+        resolve_download_hints(
+            &app,
+            &url,
+            title,
+            headers.as_ref(),
+            browser_source.as_deref(),
+        )
+        .await;
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "resolve_title",
+        "Resolve output filename",
+        AttemptStatus::Succeeded,
+        Some(final_title.clone()),
+    );
     let resolved_total_size = match total_size {
         Some(v) if v > 0 => v,
         _ => detected_size.unwrap_or(0),
@@ -1242,17 +1604,39 @@ pub async fn add_download<R: Runtime>(
         headers,
         audio_headers,
         download_strategy: Some(strategy.as_str().to_string()),
+        download_origin,
+        browser_source,
+        browser_confidence,
+        browser_request_id,
+        original_url,
+        referrer,
     };
 
-    manager.start_download(app, item.clone()).await;
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "queue_download",
+        "Queue download worker",
+        AttemptStatus::Running,
+        None,
+    );
+    manager.start_download(app.clone(), item.clone()).await;
+    emit_download_attempt(
+        &app,
+        attempt_session_id.as_deref(),
+        "queue_download",
+        "Queue download worker",
+        AttemptStatus::Succeeded,
+        Some(item.id.clone()),
+    );
 
     Ok(item)
 }
 
 #[tauri::command]
 pub async fn get_app_diagnostics<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let config_dir = crate::pathing::config_dir_for_app(&app)?;
+    let app_data_dir = crate::pathing::app_data_dir_for_app(&app)?;
     let settings = AppSettings::load(config_dir.clone()).await;
     let binaries_dir = crate::extractor::binaries::get_binaries_dir(&app)
         .await
@@ -1343,8 +1727,126 @@ pub async fn open_folder<R: Runtime>(app: AppHandle<R>, path: String) -> Result<
 }
 
 #[tauri::command]
+pub async fn delete_download_artifacts(
+    output_path: String,
+    title: String,
+    has_audio_track: bool,
+) -> Result<(), String> {
+    let final_output_path = std::path::PathBuf::from(output_path).join(title);
+    let candidate_paths =
+        crate::delete_artifacts::candidate_artifact_paths(&final_output_path, has_audio_track);
+
+    let parent = final_output_path
+        .parent()
+        .ok_or_else(|| "Invalid download path".to_string())?
+        .to_path_buf();
+
+    for artifact_path in &candidate_paths {
+        if tokio::fs::try_exists(artifact_path)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            let _ = tokio::fs::remove_file(artifact_path).await;
+        }
+    }
+
+    let mut dir = match tokio::fs::read_dir(&parent).await {
+        Ok(dir) => dir,
+        Err(_) => return Ok(()),
+    };
+
+    while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
+        let path = entry.path();
+        if candidate_paths
+            .iter()
+            .any(|artifact| crate::delete_artifacts::matches_artifact_family(&path, artifact))
+        {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn start_sniffing<R: Runtime>(app: AppHandle<R>, url: String) -> Result<(), String> {
     webview::start_sniffer(app, url)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        has_trustworthy_filename_hint, resolve_title_from_hints, strategy_from_detected_ext,
+        strategy_hint_to_media_strategy,
+    };
+    use crate::protocols::strategy::MediaStrategy;
+
+    #[test]
+    fn suspicious_server_script_title_uses_detected_filename() {
+        let title = resolve_title_from_hints(
+            "https://example.com/download.php?id=9",
+            Some("download.php"),
+            Some("invoice.pdf"),
+            Some("pdf"),
+            MediaStrategy::MetadataExtractor,
+        );
+
+        assert_eq!(title, "invoice.pdf");
+    }
+
+    #[test]
+    fn detected_extension_replaces_server_script_suffix() {
+        let title = resolve_title_from_hints(
+            "https://example.com/file.php",
+            Some("file.php"),
+            None,
+            Some("mp4"),
+            MediaStrategy::MetadataExtractor,
+        );
+
+        assert_eq!(title, "file.mp4");
+    }
+
+    #[test]
+    fn direct_probe_extension_maps_to_runtime_strategy() {
+        assert_eq!(strategy_from_detected_ext("m3u8"), MediaStrategy::HlsManifest);
+        assert_eq!(strategy_from_detected_ext("mpd"), MediaStrategy::DashManifest);
+        assert_eq!(strategy_from_detected_ext("mp4"), MediaStrategy::DirectFile);
+    }
+
+    #[test]
+    fn trustworthy_filename_hint_accepts_normal_archive_name() {
+        assert!(has_trustworthy_filename_hint(Some(
+            "DokiDoki_Message_v2.0.1 (1).zip"
+        )));
+    }
+
+    #[test]
+    fn trustworthy_filename_hint_rejects_server_script_name() {
+        assert!(!has_trustworthy_filename_hint(Some("download.php")));
+    }
+
+    #[test]
+    fn trustworthy_filename_hint_rejects_missing_extension() {
+        assert!(!has_trustworthy_filename_hint(Some("download")));
+    }
+
+    #[test]
+    fn strategy_hint_maps_to_media_strategy() {
+        assert_eq!(
+            strategy_hint_to_media_strategy(Some("direct_file")),
+            Some(MediaStrategy::DirectFile)
+        );
+        assert_eq!(
+            strategy_hint_to_media_strategy(Some("hls_manifest")),
+            Some(MediaStrategy::HlsManifest)
+        );
+        assert_eq!(
+            strategy_hint_to_media_strategy(Some("dash_manifest")),
+            Some(MediaStrategy::DashManifest)
+        );
+        assert_eq!(strategy_hint_to_media_strategy(Some("unknown")), None);
+    }
 }

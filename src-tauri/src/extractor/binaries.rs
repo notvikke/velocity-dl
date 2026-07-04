@@ -28,9 +28,8 @@ pub struct ToolStatus {
 }
 
 pub async fn get_binaries_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    let mut path = app
-        .path()
-        .app_data_dir()
+    let mut path = crate::pathing::app_data_dir_for_app(app)
+        .map_err(anyhow::Error::msg)
         .context("Failed to get app data dir")?;
     path.push("binaries");
     if !path.exists() {

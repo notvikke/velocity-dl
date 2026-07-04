@@ -4,6 +4,7 @@ import {
   MoreVertical,
   Pause,
   Play,
+  RotateCw,
   Trash2,
   Folder,
   AlertCircle,
@@ -12,8 +13,10 @@ import {
   FileText,
   Archive,
   File,
+  Info,
 } from "lucide-react";
 import { SegmentVisualizer } from "./SegmentVisualizer";
+import { formatDownloadQualityBadge } from "../lib/download-quality";
 
 interface Props {
   id: string;
@@ -33,9 +36,14 @@ interface Props {
   audio_headers?: Record<string, string>;
   audio_url?: string;
   download_strategy?: string;
+  attempt_session_id?: string;
+  quality_label?: string;
+  bitrate_kbps?: number;
   onCopyDiagnostics?: (context?: string) => void;
+  onShowAttemptDetails?: (sessionId?: string) => void;
   onPause?: (id: string) => void;
   onResume?: (id: string) => void;
+  onRefresh?: (id: string) => void;
   onDelete?: (id: string) => void;
   onOpenFolder?: (id: string) => void;
 }
@@ -63,9 +71,14 @@ export const DownloadCard = memo(function DownloadCard({
   audio_headers,
   audio_url,
   download_strategy,
+  attempt_session_id,
+  quality_label,
+  bitrate_kbps,
   onCopyDiagnostics,
+  onShowAttemptDetails,
   onPause,
   onResume,
+  onRefresh,
   onDelete,
   onOpenFolder,
 }: Props) {
@@ -73,6 +86,10 @@ export const DownloadCard = memo(function DownloadCard({
   const mainHeaderCount = headers ? Object.keys(headers).length : 0;
   const audioHeaderCount = audio_headers ? Object.keys(audio_headers).length : 0;
   const strategyLabel = download_strategy || "unknown";
+  const qualityBadge = formatDownloadQualityBadge({
+    qualityLabel: quality_label,
+    bitrateKbps: bitrate_kbps,
+  });
 
   const Icon =
     status === "error"
@@ -169,6 +186,7 @@ export const DownloadCard = memo(function DownloadCard({
                   </>
                 )}
               </div>
+              {qualityBadge && <div className="mt-1 text-[11px] text-gray-500">{qualityBadge}</div>}
             </div>
           </div>
 
@@ -181,6 +199,26 @@ export const DownloadCard = memo(function DownloadCard({
                 title={status === "active" ? "Pause" : "Resume"}
               >
                 {status === "active" ? <Pause size={14} /> : <Play size={14} />}
+              </button>
+            )}
+            {(status === "active" || status === "paused") && (
+              <button
+                type="button"
+                onClick={() => onRefresh?.(id)}
+                className="p-1.5 hover:bg-white/10 rounded text-gray-300 transition-colors"
+                title="Refresh download"
+              >
+                <RotateCw size={14} />
+              </button>
+            )}
+            {attempt_session_id && (
+              <button
+                type="button"
+                onClick={() => onShowAttemptDetails?.(attempt_session_id)}
+                className="p-1.5 hover:bg-white/10 rounded text-gray-300 transition-colors"
+                title="Show Procedure"
+              >
+                <Info size={14} />
               </button>
             )}
             <button

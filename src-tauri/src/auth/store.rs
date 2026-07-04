@@ -6,7 +6,6 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::Manager;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,9 +49,8 @@ impl AuthManager {
         &self,
         app_handle: &tauri::AppHandle<R>,
     ) -> Result<()> {
-        let app_data = app_handle
-            .path()
-            .app_data_dir()
+        let app_data = crate::pathing::app_data_dir_for_app(app_handle)
+            .map_err(anyhow::Error::msg)
             .context("Failed to get app data dir")?;
         let ebwebview_dir = app_data.join("EBWebView");
 
@@ -86,10 +84,11 @@ impl AuthManager {
                 let master_key = dpapi_win::decrypt_data(&encrypted_key[5..])?;
 
                 // 2. Open the SQLite Cookies DB (copy first to avoid locking issues)
-                let temp_db = std::env::temp_dir().join("vdl_webview_cookies.db");
+                let temp_db = std::env::temp_dir()
+                    .join(format!("vdl_webview_cookies_{}.db", uuid::Uuid::new_v4()));
                 std::fs::copy(&cookies_db_path, &temp_db)?;
 
-                let cookies = {
+                let cookies_result = (|| -> Result<Vec<(String, String)>> {
                     let conn = rusqlite::Connection::open(&temp_db)?;
                     let mut stmt =
                         conn.prepare("SELECT host_key, name, encrypted_value FROM cookies")?;
@@ -116,11 +115,11 @@ impl AuthManager {
                         "Cookie extraction complete: {} decrypted successfully, {} failed",
                         success_count, fail_count
                     );
-                    cookies
-                };
+                    Ok(cookies)
+                })();
 
                 let _ = std::fs::remove_file(&temp_db);
-                Ok(cookies)
+                cookies_result
             })
             .await??;
 

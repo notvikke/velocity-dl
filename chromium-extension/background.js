@@ -1,3 +1,6 @@
+import { shouldRejectWeakScanCapture } from "./capture-routing.js";
+import { shouldReinjectScanOverlay } from "./scan-overlay-state.js";
+
 const NATIVE_HOST = "com.velocitydl.native_host";
 const HEARTBEAT_ALARM = "vdlExtensionHeartbeat";
 const HEARTBEAT_PERIOD_MINUTES = 5;
@@ -5,7 +8,7 @@ const HEARTBEAT_PERIOD_MINUTES = 5;
 const DEFAULT_SETTINGS = {
   takeoverAllDownloads: true,
   showContextMenu: true,
-  autoOpenQualityPickerOnScanCapture: true,
+  scanCaptureMode: "quality_picker",
 };
 let menuRebuildQueue = Promise.resolve();
 const WEBREQUEST_CAPTURE_DEDUPE_WINDOW_MS = 90_000;
@@ -81,10 +84,24 @@ async function applyScanStateToTab(tabId, active, frameId) {
           { type: "vdl_scan_set_active", active: !!active },
           { frameId: targetFrameId }
         );
-      } catch (err) {
-        const msg = String(err?.message || err || "");
-        if (!msg.includes("Receiving end does not exist")) {
-          console.warn("[VelocityDL] Failed to apply scan state:", err);
+      } catch (initialError) {
+        if (!shouldReinjectScanOverlay(initialError)) {
+          console.warn("[VelocityDL] Failed to apply scan state:", initialError);
+          return;
+        }
+
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId, frameIds: [targetFrameId] },
+            files: ["scan-overlay.js"],
+          });
+          await chrome.tabs.sendMessage(
+            tabId,
+            { type: "vdl_scan_set_active", active: !!active },
+            { frameId: targetFrameId }
+          );
+        } catch (retryError) {
+          console.warn("[VelocityDL] Failed to re-inject scan overlay:", retryError);
         }
       }
     })
@@ -118,7 +135,16 @@ async function initializeActiveScanTabs() {
 
 async function getSettings() {
   const data = await chrome.storage.local.get(DEFAULT_SETTINGS);
-  return { ...DEFAULT_SETTINGS, ...data };
+  return {
+    ...DEFAULT_SETTINGS,
+    ...data,
+    scanCaptureMode:
+      data.scanCaptureMode === "current_stream" || data.scanCaptureMode === "quality_picker"
+        ? data.scanCaptureMode
+        : data.autoOpenQualityPickerOnScanCapture === false
+          ? "current_stream"
+          : "quality_picker",
+  };
 }
 
 function removeAllContextMenus() {
@@ -229,6 +255,24 @@ function isLikelyManifestUrl(url) {
   const parts = parseUrlParts(url);
   if (!parts) return false;
   return /\.(m3u8|mpd)$/i.test(parts.path);
+}
+
+function isYouTubePageUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === "youtube.com" ||
+      host === "www.youtube.com" ||
+      host === "m.youtube.com" ||
+      host === "youtu.be" ||
+      host === "youtube-nocookie.com" ||
+      host === "www.youtube-nocookie.com"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isConcretePlayableUrl(url) {
@@ -463,14 +507,60 @@ function classifyCapture(payload) {
   return "page_url";
 }
 
+function inferBrowserConfidence(payload) {
+  const url = payload?.url || "";
+  const originalUrl = payload?.original_url || "";
+  const rawMediaUrl = payload?.raw_media_url || payload?.rawMediaUrl || "";
+  const mime = payload?.mime || "";
+  const referrer = payload?.referrer || "";
+  const candidateUrl = url || rawMediaUrl || originalUrl;
+
+  if (isYouTubePageUrl(referrer) && isConcretePlayableUrl(candidateUrl)) {
+    return "ambiguous_media";
+  }
+  if (isLikelyManifestUrl(candidateUrl)) {
+    return "strong_manifest";
+  }
+  if (
+    payload?.source === "chromium-downloads-api" ||
+    /^application\/(?:octet-stream|vnd\.apple\.mpegurl|x-mpegurl|dash\+xml)/i.test(mime) ||
+    isLikelyDirectMediaUrl(candidateUrl) ||
+    isLikelyDownloadableFileUrl(candidateUrl)
+  ) {
+    return "strong_direct";
+  }
+  if (payload?.source === "chromium-context-page" || payload?.capture_type === "page_url") {
+    return "page";
+  }
+  return "ambiguous_media";
+}
+
+function normalizeCapturePayload(payload) {
+  const capture_type = payload.capture_type || classifyCapture(payload);
+  const normalized = {
+    ...payload,
+    capture_type,
+    original_url: payload.original_url || payload.url || null,
+    browser_confidence: payload.browser_confidence || inferBrowserConfidence({ ...payload, capture_type }),
+  };
+  return normalized;
+}
+
 async function sendCapture(payload) {
   try {
-    const capture_type = payload.capture_type || classifyCapture(payload);
+    const normalizedPayload = normalizeCapturePayload(payload);
+    const requestId =
+      normalizedPayload.request_id ||
+      `capture-${normalizedPayload.source || "unknown"}-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
     const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
       action: "capture",
-      capture_type,
+      capture_type: normalizedPayload.capture_type,
+      request_id: requestId,
+      wait_for_ack: normalizedPayload.wait_for_ack !== false,
       sent_at_ms: Date.now(),
-      ...payload,
+      ...normalizedPayload,
     });
     if (!response?.ok) {
       console.warn("[VelocityDL] Native host returned error:", response?.message);
@@ -652,6 +742,7 @@ async function flushPendingBrowserDownload(id) {
   const requestId = `downloads-${id}-${Date.now()}`;
   const handoff = await sendCapture({
     url: candidateUrl,
+    original_url: pending.originalUrl || candidateUrl,
     filename: pending.filename || null,
     mime: pending.mime || null,
     source: "chromium-downloads-api",
@@ -757,6 +848,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "vdl-download-link" && shouldHandleUrl(info.linkUrl)) {
     await sendCapture({
       url: info.linkUrl,
+      original_url: info.linkUrl,
       referrer: info.pageUrl || null,
       source: "chromium-context-link",
       headers: info.pageUrl ? { Referer: info.pageUrl } : null,
@@ -767,6 +859,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "vdl-download-page" && tab?.url && shouldHandleUrl(tab.url)) {
     await sendCapture({
       url: tab.url,
+      original_url: tab.url,
       source: "chromium-context-page",
       headers: tab.url ? { Referer: tab.url } : null,
     });
@@ -776,6 +869,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "vdl-download-media" && shouldHandleUrl(info.srcUrl)) {
     await sendCapture({
       url: info.srcUrl,
+      original_url: info.srcUrl,
       referrer: info.pageUrl || null,
       source: "chromium-context-media",
       headers: info.pageUrl ? { Referer: info.pageUrl } : null,
@@ -833,8 +927,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const next = {
         takeoverAllDownloads: !!message.takeoverAllDownloads,
         showContextMenu: !!message.showContextMenu,
-        autoOpenQualityPickerOnScanCapture:
-          message.autoOpenQualityPickerOnScanCapture !== false,
+        scanCaptureMode:
+          message.scanCaptureMode === "current_stream" ? "current_stream" : "quality_picker",
       };
       await chrome.storage.local.set(next);
       queueRebuildContextMenus(next.showContextMenu);
@@ -917,25 +1011,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         })),
       });
 
-      const lacksConcretePlayable =
-        !isConcretePlayableUrl(resolvedUrl) &&
-        !isConcretePlayableUrl(resolvedRawMediaUrl || "");
-      const isLikelyBadEmbedFallback =
-        message?.source === "chromium-scan-overlay" &&
-        lacksConcretePlayable &&
-        (
-          !resolvedRawMediaUrl ||
-          normalizeForWebRequestDedupe(resolvedRawMediaUrl) === normalizeForWebRequestDedupe(referrer || "")
-        ) &&
-        (
-          normalizeForWebRequestDedupe(resolvedUrl) === normalizeForWebRequestDedupe(referrer || "") ||
-          isLikelyEmbedPageUrl(resolvedUrl)
-        );
+      const weakScanCaptureDecision = shouldRejectWeakScanCapture({
+        source: message?.source,
+        referrer,
+        resolvedUrl,
+        resolvedRawMediaUrl,
+        hasConcreteResolvedUrl: isConcretePlayableUrl(resolvedUrl),
+        hasConcreteRawMediaUrl: isConcretePlayableUrl(resolvedRawMediaUrl || ""),
+        hasTopCandidate: rankedCandidates.length > 0,
+        isLikelyEmbedPage: isLikelyEmbedPageUrl(resolvedUrl),
+        rawMediaWasBlob: /^blob:/i.test(rawMediaUrl || ""),
+      });
 
-      if (isLikelyBadEmbedFallback) {
+      if (weakScanCaptureDecision.reject) {
+        await setLastScanDebug({
+          at: Date.now(),
+          tabId: senderTabId ?? null,
+          referrer,
+          inputUrl: message.url || null,
+          inputRawMediaUrl: rawMediaUrl || null,
+          resolvedUrl,
+          resolvedRawMediaUrl: resolvedRawMediaUrl || null,
+          usedRecentPlayable:
+            resolvedUrl !== message.url &&
+            typeof resolvedUrl === "string" &&
+            resolvedUrl === rankedCandidates[0]?.url,
+          rejectionReason: weakScanCaptureDecision.reason,
+          topCandidates: rankedCandidates.map((entry) => ({
+            url: entry.url,
+            score: entry.score,
+            initiator: entry.initiator,
+            documentUrl: entry.documentUrl,
+            mime: entry.mime,
+          })),
+        });
         sendResponse({
           ok: false,
-          message: "No direct video stream detected yet. Start playback, wait a few seconds, then try capture again.",
+          message:
+            weakScanCaptureDecision.reason === "weak_blob_scan_capture"
+              ? "Only a blob-backed player URL was detected. Start playback, wait a few seconds for the real media request, then try capture again or use Deep Sniff."
+              : "No direct video stream detected yet. Start playback, wait a few seconds, then try capture again.",
         });
         return;
       }
@@ -945,15 +1060,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      const scanSettings = await getSettings();
       const payload = {
         url: resolvedUrl,
+        original_url: message.url || resolvedUrl,
         filename: message.filename || null,
         mime: message.mime || null,
         raw_media_url: resolvedRawMediaUrl,
         referrer,
         source: "chromium-scan-overlay",
-        scan_auto_open_quality_picker:
-          (await getSettings()).autoOpenQualityPickerOnScanCapture !== false,
+        scan_auto_open_quality_picker: scanSettings.scanCaptureMode === "quality_picker",
+        scan_capture_mode: scanSettings.scanCaptureMode,
         headers: referrer
           ? {
               Referer: referrer,

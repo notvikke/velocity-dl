@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.0-beta.2 - 2026-07-04
+
+Browser takeover reliability and release-packaging hardening update.
+
+- Added a deterministic browser-originated routing flow so direct files, manifests, and ambiguous page captures follow explicit takeover paths instead of drifting through mixed heuristics.
+- Added detailed per-download procedure reporting in the app so failures and fallbacks now show what was attempted, what failed, and what succeeded.
+- Added a Start Download confirmation path for ambiguous browser captures while keeping auto-start behavior for strong browser-confirmed direct and manifest downloads.
+- Improved browser session propagation for downloader, manifest, and extractor flows so referrer and request headers survive handoff, retry, and resume more reliably.
+- Improved scan overlay and extension capture routing behavior, including clearer quality-selection handling and less duplicated extension UI.
+- Hardened delete flow support so the app can distinguish removing a queue item from removing the downloaded file on disk.
+- Switched the default Windows installer path to a lean package that bundles only the essential app components and downloads heavy media tools on demand.
+- Added a safe dev-cache cleanup script so local Rust build caches can be removed without losing release installers.
+
 ## 0.1.0-alpha.1 - 2026-04-17
 
 Initial public alpha preparation release.

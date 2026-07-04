@@ -5,41 +5,108 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>VelocityDL Bridge Settings</title>
     <style>
-      body { font-family: Segoe UI, sans-serif; margin: 24px; max-width: 680px; }
-      h1 { font-size: 18px; margin-bottom: 18px; }
-      .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; }
-      .desc { color: #555; font-size: 13px; margin-top: 4px; }
-      .status { margin-top: 16px; font-size: 13px; color: #0a7f35; }
-      code { background: #f5f5f5; padding: 2px 4px; border-radius: 4px; }
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f16;
+        --panel: #131925;
+        --line: #263044;
+        --text: #f4f7fb;
+        --muted: #8f9cb0;
+        --ok: #20c47a;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", Arial, sans-serif;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 28px 24px 36px;
+      }
+      h1 { font-size: 22px; margin: 0 0 8px; }
+      .lead {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+        margin: 0 0 22px;
+      }
+      .panel {
+        margin-bottom: 16px;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+      }
+      .panel h2 {
+        margin: 0 0 8px;
+        font-size: 15px;
+      }
+      .panel p,
+      .panel li {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+      .status {
+        margin-top: 12px;
+        font-size: 13px;
+        color: var(--ok);
+      }
+      code {
+        background: rgba(255,255,255,0.06);
+        padding: 2px 5px;
+        border-radius: 5px;
+      }
+      .kv {
+        display: grid;
+        gap: 8px;
+      }
+      .kv-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        border-top: 1px solid rgba(255,255,255,0.05);
+        padding-top: 8px;
+      }
+      .kv-row:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+      .label {
+        color: var(--text);
+        font-weight: 600;
+      }
     </style>
   </head>
   <body>
-    <h1>VelocityDL Bridge</h1>
-    <div class="row">
-      <div>
-        <div><strong>Take over browser downloads</strong></div>
-        <div class="desc">Cancel browser download and send URL to VelocityDL (IDM-like default mode).</div>
-      </div>
-      <input id="takeoverAllDownloads" type="checkbox" />
-    </div>
-    <div class="row">
-      <div>
-        <div><strong>Show context menus</strong></div>
-        <div class="desc">Adds right-click: Download with VelocityDL.</div>
-      </div>
-      <input id="showContextMenu" type="checkbox" />
-    </div>
-    <div class="row">
-      <div>
-        <div><strong>Auto-open quality picker on scan capture</strong></div>
-        <div class="desc">If off, scan button one-click downloads current direct stream when detectable.</div>
-      </div>
-      <input id="autoOpenQualityPickerOnScanCapture" type="checkbox" />
-    </div>
-    <div class="status" id="status"></div>
-    <p class="desc">
-      Native host name: <code>com.velocitydl.native_host</code>
-    </p>
+    <main>
+      <h1>VelocityDL Bridge</h1>
+      <p class="lead">
+        Popup controls are now the single place for download takeover, context menus, and scan mode.
+        This page keeps only troubleshooting details so those settings are not duplicated.
+      </p>
+
+      <section class="panel">
+        <h2>Current Settings Summary</h2>
+        <div class="kv" id="settingsSummary"></div>
+        <div class="status" id="status"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Troubleshooting</h2>
+        <ul>
+          <li>If scan overlay was enabled on an already-open page, VelocityDL now retries script injection without requiring a full page reload.</li>
+          <li>Keep the native host name at <code>com.velocitydl.native_host</code>.</li>
+          <li>If multiple unpacked VelocityDL copies are loaded in Chrome, disable the unused ones.</li>
+        </ul>
+      </section>
+    </main>
     <script src="options.js" type="module"></script>
   </body>
 </html>

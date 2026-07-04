@@ -1,19 +1,42 @@
 const defaults = {
   takeoverAllDownloads: true,
   showContextMenu: true,
-  autoOpenQualityPickerOnScanCapture: true,
+  scanCaptureMode: "quality_picker",
 };
 
-const takeoverInput = document.getElementById("takeoverAllDownloads");
-const menuInput = document.getElementById("showContextMenu");
-const scanPickerInput = document.getElementById("autoOpenQualityPickerOnScanCapture");
+const settingsSummary = document.getElementById("settingsSummary");
 const status = document.getElementById("status");
 
 async function load() {
   const data = await chrome.storage.local.get(defaults);
-  takeoverInput.checked = !!data.takeoverAllDownloads;
-  menuInput.checked = !!data.showContextMenu;
-  scanPickerInput.checked = data.autoOpenQualityPickerOnScanCapture !== false;
+  const scanCaptureMode =
+    data.scanCaptureMode === "current_stream" || data.scanCaptureMode === "quality_picker"
+      ? data.scanCaptureMode
+      : data.autoOpenQualityPickerOnScanCapture === false
+        ? "current_stream"
+        : "quality_picker";
+  settingsSummary.replaceChildren();
+  [
+    ["Take over downloads", data.takeoverAllDownloads ? "On" : "Off"],
+    ["Context menus", data.showContextMenu ? "On" : "Off"],
+    ["Scan capture mode", scanCaptureMode === "quality_picker" ? "Quality picker" : "Current stream"],
+    ["Runtime ID", chrome.runtime.id],
+  ].forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "kv-row";
+
+    const left = document.createElement("div");
+    left.className = "label";
+    left.textContent = label;
+
+    const right = document.createElement("div");
+    right.textContent = value;
+
+    row.appendChild(left);
+    row.appendChild(right);
+    settingsSummary.appendChild(row);
+  });
+  setStatus("Popup settings mirrored here for diagnostics.");
 }
 
 let statusTimer = null;
@@ -22,18 +45,5 @@ function setStatus(text) {
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = setTimeout(() => (status.textContent = ""), 1500);
 }
-
-async function save() {
-  await chrome.storage.local.set({
-    takeoverAllDownloads: takeoverInput.checked,
-    showContextMenu: menuInput.checked,
-    autoOpenQualityPickerOnScanCapture: scanPickerInput.checked,
-  });
-  setStatus("Saved");
-}
-
-takeoverInput.addEventListener("change", save);
-menuInput.addEventListener("change", save);
-scanPickerInput.addEventListener("change", save);
 
 load();

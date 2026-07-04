@@ -8,7 +8,7 @@ Use this template when publishing a new GitHub release.
 
 Example:
 
-`VelocityDL 0.1.0-beta.1`
+`VelocityDL 0.1.0-beta.2`
 
 ## Notes Template
 

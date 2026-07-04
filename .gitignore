@@ -25,3 +25,5 @@ dist-ssr
 SESSION_RECOVERY.md
 s1.jpg
 vendor-binaries/
+.dev-profile/
+releases/

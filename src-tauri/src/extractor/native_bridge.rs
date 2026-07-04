@@ -43,6 +43,10 @@ pub struct NativeInboxEvent {
     pub request_id: Option<String>,
     #[serde(default)]
     pub wait_for_ack: Option<bool>,
+    #[serde(default)]
+    pub original_url: Option<String>,
+    #[serde(default)]
+    pub browser_confidence: Option<String>,
 }
 
 fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -86,6 +90,8 @@ pub struct CaptureAckPayload {
     pub request_id: String,
     pub accepted: bool,
     pub message: String,
+    #[serde(default)]
+    pub route_class: Option<String>,
 }
 
 impl Default for ExtensionHealthState {
@@ -199,7 +205,7 @@ pub async fn mark_external_capture_listener_ready<R: Runtime>(app: &AppHandle<R>
 }
 
 pub async fn start_app_presence<R: Runtime>(app: AppHandle<R>) {
-    let config_dir = match app.path().app_config_dir() {
+    let config_dir = match crate::pathing::config_dir_for_app(&app) {
         Ok(p) => p,
         Err(e) => {
             log::error!("Failed to resolve app config dir for app presence: {}", e);
@@ -296,8 +302,15 @@ async fn save_offset(cursor_path: &PathBuf, offset: u64) {
     let _ = fs::write(cursor_path, offset.to_string()).await;
 }
 
+fn initial_inbox_offset(saved_offset: Option<u64>, inbox_len: u64) -> u64 {
+    match saved_offset {
+        Some(offset) => offset.min(inbox_len),
+        None => inbox_len,
+    }
+}
+
 pub async fn start_native_inbox_polling<R: Runtime>(app: AppHandle<R>) {
-    let config_dir = match app.path().app_config_dir() {
+    let config_dir = match crate::pathing::config_dir_for_app(&app) {
         Ok(p) => p,
         Err(e) => {
             log::error!("Failed to resolve app config dir for native inbox: {}", e);
@@ -310,10 +323,9 @@ pub async fn start_native_inbox_polling<R: Runtime>(app: AppHandle<R>) {
     app.state::<ExtensionHealthState>()
         .replace(initial_health)
         .await;
-    let mut offset = load_offset(&cursor_path).await.unwrap_or(0);
-    if offset == 0 {
-        save_offset(&cursor_path, 0).await;
-    }
+    let inbox_len = fs::metadata(&inbox_path).await.map(|meta| meta.len()).unwrap_or(0);
+    let mut offset = initial_inbox_offset(load_offset(&cursor_path).await, inbox_len);
+    save_offset(&cursor_path, offset).await;
 
     tokio::spawn(async move {
         loop {
@@ -344,4 +356,24 @@ pub async fn start_native_inbox_polling<R: Runtime>(app: AppHandle<R>) {
             sleep(Duration::from_millis(1500)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initial_inbox_offset;
+
+    #[test]
+    fn missing_cursor_skips_existing_inbox_history() {
+        assert_eq!(initial_inbox_offset(None, 512), 512);
+    }
+
+    #[test]
+    fn existing_cursor_is_preserved_when_valid() {
+        assert_eq!(initial_inbox_offset(Some(128), 512), 128);
+    }
+
+    #[test]
+    fn existing_cursor_is_clamped_when_inbox_shrinks() {
+        assert_eq!(initial_inbox_offset(Some(900), 512), 512);
+    }
 }

@@ -59,10 +59,44 @@ interface AddUrlModalProps {
     headers?: Record<string, string>,
     audioUrl?: string,
     audioSize?: number,
-    audioHeaders?: Record<string, string>
+    audioHeaders?: Record<string, string>,
+    attemptSessionId?: string,
+    qualityMetadata?: {
+      qualityLabel?: string;
+      bitrateKbps?: number;
+    },
+    downloadContext?: {
+      strategyHint?: "direct_file" | "hls_manifest" | "dash_manifest";
+      downloadOrigin?: "browser_takeover" | "manual" | "sniff_capture";
+      browserSource?: string;
+      browserConfidence?: "strong_direct" | "strong_manifest" | "ambiguous_media" | "page";
+      browserRequestId?: string;
+      originalUrl?: string;
+      referrer?: string;
+      routeClass?: string;
+    }
+  ) => void;
+  onAttemptStart: (title: string, url: string) => string;
+  onAttemptFinish: (
+    sessionId: string,
+    status: "running" | "succeeded" | "failed",
+    summary?: string,
+    autoCloseMs?: number
   ) => void;
   initialUrl?: string;
   initialHeaders?: Record<string, string>;
+  initialAttemptSessionId?: string;
+  initialDownloadContext?: {
+    strategyHint?: "direct_file" | "hls_manifest" | "dash_manifest";
+    downloadOrigin?: "browser_takeover" | "manual" | "sniff_capture";
+    browserSource?: string;
+    browserConfidence?: "strong_direct" | "strong_manifest" | "ambiguous_media" | "page";
+    browserRequestId?: string;
+    originalUrl?: string;
+    referrer?: string;
+    routeClass?: string;
+  };
+  launchSource?: "manual" | "browser_capture" | "media_detected";
 }
 
 interface AppSettings {
@@ -71,7 +105,18 @@ interface AppSettings {
   accept_browser_download_requests?: boolean;
 }
 
-export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders }: AddUrlModalProps) {
+export function AddUrlModal({
+  isOpen,
+  onClose,
+  onAdd,
+  onAttemptStart,
+  onAttemptFinish,
+  initialUrl,
+  initialHeaders,
+  initialAttemptSessionId,
+  initialDownloadContext,
+  launchSource = "manual",
+}: AddUrlModalProps) {
   const [url, setUrl] = useState("");
   const [path, setPath] = useState("");
   const [isFetching, setIsFetching] = useState(false);
@@ -84,6 +129,7 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
   const [isDirectUrl, setIsDirectUrl] = useState(false);
   const [autoStartSniffCapture, setAutoStartSniffCapture] = useState(false);
   const [diagnosticStatus, setDiagnosticStatus] = useState("");
+  const [currentAttemptSessionId, setCurrentAttemptSessionId] = useState<string | null>(null);
 
   // Build quality tiers from raw formats
   const qualityTiers = useMemo((): QualityTier[] => {
@@ -221,7 +267,23 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
 
     if (isDirectUrl && !metadata) {
       // Direct URL download without metadata
-      onAdd(url, path, url.split('/').pop()?.split('?')[0] || "downloaded_media");
+      const sessionId =
+        currentAttemptSessionId ||
+        initialAttemptSessionId ||
+        onAttemptStart(url.split('/').pop()?.split('?')[0] || "downloaded_media", url);
+      onAdd(
+        url,
+        path,
+        url.split('/').pop()?.split('?')[0] || "downloaded_media",
+        undefined,
+        capturedHeaders || initialHeaders,
+        undefined,
+        undefined,
+        undefined,
+        sessionId,
+        undefined,
+        initialDownloadContext
+      );
       onClose();
       return;
     }
@@ -229,6 +291,15 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
     if (!selectedTier) return;
 
     const title = metadata ? `${metadata.title}.${selectedTier.videoFormat?.ext || selectedTier.audioFormat?.ext || metadata.ext}` : undefined;
+    const qualityMetadata = {
+      qualityLabel: selectedTier.label || undefined,
+      bitrateKbps:
+        selectedTier.videoFormat?.vbr ||
+        selectedTier.videoFormat?.tbr ||
+        selectedTier.audioFormat?.abr ||
+        selectedTier.audioFormat?.tbr ||
+        undefined,
+    };
 
     if (selectedTier.isAudioOnly) {
       // Audio-only download
@@ -238,6 +309,12 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
         metadata ? `${metadata.title}.${selectedTier.audioFormat!.ext}` : undefined,
         selectedTier.audioFormat!.filesize || selectedTier.audioFormat!.filesize_approx,
         selectedTier.audioFormat!.http_headers || metadata?.http_headers,
+        undefined,
+        undefined,
+        undefined,
+        currentAttemptSessionId || initialAttemptSessionId || undefined,
+        qualityMetadata,
+        initialDownloadContext,
       );
     } else if (selectedTier.isCombined) {
       // Single combined download
@@ -247,6 +324,12 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
         title,
         selectedTier.videoFormat!.filesize || selectedTier.videoFormat!.filesize_approx,
         selectedTier.videoFormat!.http_headers || metadata?.http_headers,
+        undefined,
+        undefined,
+        undefined,
+        currentAttemptSessionId || initialAttemptSessionId || undefined,
+        qualityMetadata,
+        initialDownloadContext,
       );
     } else {
       // Multi-track: video + audio (the key fix!)
@@ -259,6 +342,9 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
         selectedTier.audioFormat?.url,
         selectedTier.audioFormat?.filesize || selectedTier.audioFormat?.filesize_approx,
         selectedTier.audioFormat?.http_headers || metadata?.http_headers,
+        currentAttemptSessionId || initialAttemptSessionId || undefined,
+        qualityMetadata,
+        initialDownloadContext,
       );
     }
     
@@ -285,7 +371,7 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
             const effectivePath = path?.trim();
             if (effectivePath) {
               const guessedTitle = mediaUrl.split('/').pop()?.split('?')[0] || "captured_stream.mp4";
-              onAdd(mediaUrl, effectivePath, guessedTitle, undefined, headers);
+              onAdd(mediaUrl, effectivePath, guessedTitle, undefined, headers, undefined, undefined, undefined, currentAttemptSessionId || initialAttemptSessionId || undefined, undefined, initialDownloadContext);
               onClose();
               return;
             }
@@ -333,12 +419,13 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
       setIsSniffing(false);
       setSelectedTier(null);
       setCapturedHeaders(undefined);
+      setCurrentAttemptSessionId(initialAttemptSessionId || null);
       invoke<AppSettings>("get_settings").then(s => {
         if (!path) setPath(s.default_download_path);
         setAutoStartSniffCapture(!!s.auto_start_sniff_capture);
       });
     }
-  }, [isOpen]);
+  }, [initialAttemptSessionId, isOpen]);
 
   useEffect(() => {
     if (initialUrl) {
@@ -360,24 +447,35 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
     setMetadata(null);
     setSelectedTier(null);
     setError(null);
+    const attemptSessionId =
+      currentAttemptSessionId ||
+      initialAttemptSessionId ||
+      onAttemptStart("Inspect URL", targetUrl);
+    setCurrentAttemptSessionId(attemptSessionId);
     try {
       setIsDirectUrl(!!checkIsDirectUrl(targetUrl));
       const effectiveHeaders = overrideHeaders || capturedHeaders;
-      const data = await invoke<YtMetadata>("fetch_metadata", { url: targetUrl, headers: effectiveHeaders });
+      const data = await invoke<YtMetadata>("fetch_metadata", {
+        url: targetUrl,
+        headers: effectiveHeaders,
+        attemptSessionId,
+      });
       if (!data.formats || data.formats.length === 0) {
           throw new Error("No formats found for this URL.");
       }
       setMetadata(data);
+      onAttemptFinish(attemptSessionId, "succeeded", `Loaded ${data.title}`, 1200);
     } catch (e: any) {
       console.error("Fetch metadata failed", e);
       const msg = typeof e === 'string' ? e : e.message || "Failed to fetch media info.";
       setError(msg);
+      onAttemptFinish(attemptSessionId, "failed", msg);
 
       // If this came from an explicit deep-sniff capture, fall back to direct queueing.
       if (fromSniffCapture && path) {
         const fallbackHeaders = overrideHeaders || capturedHeaders;
         const guessedTitle = targetUrl.split('/').pop()?.split('?')[0] || "captured_stream.mp4";
-        onAdd(targetUrl, path, guessedTitle, undefined, fallbackHeaders);
+        onAdd(targetUrl, path, guessedTitle, undefined, fallbackHeaders, undefined, undefined, undefined, attemptSessionId, undefined, initialDownloadContext);
         onClose();
       }
     } finally {
@@ -536,6 +634,16 @@ export function AddUrlModal({ isOpen, onClose, onAdd, initialUrl, initialHeaders
                         {diagnosticStatus && <span className="text-[11px] text-gray-300">{diagnosticStatus}</span>}
                       </div>
                   </motion.div>
+              )}
+
+              {launchSource === "browser_capture" && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="rounded-lg border border-accent/30 bg-accent/8 px-3 py-2 text-[11px] text-accent/90"
+                >
+                  Browser handoff succeeded. Review the captured stream or page details, then click <span className="font-semibold text-white">Start Download</span> to queue it in VelocityDL.
+                </motion.div>
               )}
 
               {metadata && (

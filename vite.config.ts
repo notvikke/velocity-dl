@@ -27,7 +27,7 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/native_inbox.jsonl", "**/native_inbox.offset", "**/app_alive", "**/extension_health.json"],
     },
   },
 }));

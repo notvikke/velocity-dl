@@ -61,6 +61,13 @@ pub struct YtDlpFormat {
     pub container: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum StrategyAttemptState {
+    Running,
+    Succeeded,
+    Failed,
+}
+
 struct StrategyProfile {
     name: &'static str,
     patterns: &'static [&'static str],
@@ -188,19 +195,21 @@ fn build_header_args(headers: &HashMap<String, String>) -> Vec<String> {
     args
 }
 
-fn browser_cookie_strategies(prefix: &str) -> Vec<StrategySpec> {
+fn browser_cookie_strategies(prefix: &str, shared_args: &[String]) -> Vec<StrategySpec> {
     let mut out = Vec::new();
     for browser in ["edge", "chrome", "brave", "firefox"] {
+        let mut args = shared_args.to_vec();
+        args.extend([
+            "--cookies-from-browser".to_string(),
+            browser.to_string(),
+            "--user-agent".to_string(),
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string(),
+            "--extractor-retries".to_string(),
+            "0".to_string(),
+        ]);
         out.push(StrategySpec {
             label: format!("{} ({})", prefix, browser),
-            args: vec![
-                "--cookies-from-browser".to_string(),
-                browser.to_string(),
-                "--user-agent".to_string(),
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string(),
-                "--extractor-retries".to_string(),
-                "0".to_string(),
-            ],
+            args,
         });
     }
     out
@@ -211,8 +220,10 @@ fn strategy_plan(
     sniff_headers: Option<&HashMap<String, String>>,
 ) -> Vec<StrategySpec> {
     let mut plan = Vec::new();
+    let shared_header_args = sniff_headers.map(build_header_args).unwrap_or_default();
     let base_args = || {
         let mut args = vec!["--extractor-retries".to_string(), "0".to_string()];
+        args.extend(shared_header_args.clone());
         if profile.browser_impersonation {
             args.push("--impersonate".to_string());
             args.push("chrome".to_string());
@@ -220,17 +231,17 @@ fn strategy_plan(
         args
     };
 
-    if let Some(headers) = sniff_headers {
-        let mut args = base_args();
-        args.extend(build_header_args(headers));
+    if sniff_headers.is_some() {
+        let args = base_args();
+        // Keep one explicit session-driven attempt at the front of the plan.
         plan.push(StrategySpec {
-            label: "Sniff headers".to_string(),
+            label: "Browser session headers".to_string(),
             args,
         });
     }
 
     if profile.cookie_first {
-        plan.extend(browser_cookie_strategies("Cookie-first"));
+        plan.extend(browser_cookie_strategies("Cookie-first", &shared_header_args));
     }
 
     plan.push(StrategySpec {
@@ -270,7 +281,7 @@ fn strategy_plan(
     }
 
     if !profile.cookie_first {
-        plan.extend(browser_cookie_strategies("Browser cookies"));
+        plan.extend(browser_cookie_strategies("Browser cookies", &shared_header_args));
     }
 
     if profile.js_heavy_fallback {
@@ -353,7 +364,7 @@ fn try_strategy(ytdlp_path: &PathBuf, strategy: &StrategySpec, url: &str) -> Res
     for arg in &strategy.args {
         cmd.arg(arg);
     }
-    cmd.arg(url);
+    cmd.arg("--").arg(url);
 
     #[cfg(windows)]
     {
@@ -387,6 +398,7 @@ pub fn get_metadata(
     config_dir: &PathBuf,
     url: &str,
     sniff_headers: Option<HashMap<String, String>>,
+    on_strategy: &mut dyn FnMut(&str, StrategyAttemptState, Option<&str>),
 ) -> Result<YtDlpMetadata> {
     let host = normalized_host(url);
     let profile = resolve_profile(&host);
@@ -398,8 +410,10 @@ pub fn get_metadata(
 
     let mut last_error = String::new();
     for strategy in plan {
+        on_strategy(&strategy.label, StrategyAttemptState::Running, None);
         match try_strategy(ytdlp_path, &strategy, url) {
             Ok(metadata) => {
+                on_strategy(&strategy.label, StrategyAttemptState::Succeeded, None);
                 append_telemetry(
                     config_dir,
                     &StrategyTelemetryRecord {
@@ -421,6 +435,11 @@ pub fn get_metadata(
             }
             Err(e) => {
                 last_error = e.to_string();
+                on_strategy(
+                    &strategy.label,
+                    StrategyAttemptState::Failed,
+                    Some(last_error.as_str()),
+                );
                 append_telemetry(
                     config_dir,
                     &StrategyTelemetryRecord {
@@ -465,4 +484,52 @@ pub fn get_metadata(
         profile.name,
         truncated_err.trim()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_profile, strategy_plan};
+    use std::collections::HashMap;
+
+    fn header_arg_pairs(args: &[String]) -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == "--add-header")
+            .map(|pair| pair[1].clone())
+            .collect()
+    }
+
+    #[test]
+    fn default_strategy_plan_keeps_browser_session_headers_on_default_strategy() {
+        let profile = resolve_profile("media.example.com");
+        let mut headers = HashMap::new();
+        headers.insert("Referer".to_string(), "https://media.example.com/watch/alpha".to_string());
+        headers.insert("Cookie".to_string(), "sid=abc".to_string());
+
+        let plan = strategy_plan(profile, Some(&headers));
+        let default = plan
+            .iter()
+            .find(|strategy| strategy.label == "Default (auto)")
+            .expect("default strategy missing");
+        let header_args = header_arg_pairs(&default.args);
+
+        assert!(header_args.iter().any(|value| value == "Referer: https://media.example.com/watch/alpha"));
+        assert!(header_args.iter().any(|value| value == "Cookie: sid=abc"));
+    }
+
+    #[test]
+    fn cookie_first_strategy_plan_preserves_session_headers_on_cookie_attempt() {
+        let profile = resolve_profile("twitter.com");
+        let mut headers = HashMap::new();
+        headers.insert("Referer".to_string(), "https://twitter.com/some/status/1".to_string());
+
+        let plan = strategy_plan(profile, Some(&headers));
+        let cookie_first = plan
+            .iter()
+            .find(|strategy| strategy.label == "Cookie-first (edge)")
+            .expect("cookie-first strategy missing");
+        let header_args = header_arg_pairs(&cookie_first.args);
+
+        assert!(cookie_first.args.iter().any(|value| value == "--cookies-from-browser"));
+        assert!(header_args.iter().any(|value| value == "Referer: https://twitter.com/some/status/1"));
+    }
 }

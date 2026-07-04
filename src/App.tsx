@@ -5,13 +5,19 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Download, CheckCircle, Film, Music, FileText, LayoutGrid, Settings, Plus, Maximize2, Minimize2, X, Search, Puzzle } from "lucide-react";
 import { DownloadCard } from "./components/DownloadCard";
+import { DownloadAttemptDialog } from "./components/DownloadAttemptDialog";
 import { WelcomeSetupModal } from "./components/WelcomeSetupModal";
+import { shouldOpenPickerForBrowserCapture } from "./lib/browser-capture-routing";
+import { shouldRevealAppForBrowserHandoff } from "./lib/browser-handoff-ux";
 import { copyAppDiagnosticsToClipboard, installConsoleDiagnostics } from "./lib/diagnostics";
+import type { DownloadQualityBadgeInput } from "./lib/download-quality";
+import { shouldAutoRefreshDownload, type DownloadRefreshRuntimeState, isZeroLikeSpeed } from "./lib/download-refresh";
 import "./styles/tailwind.css";
 
 const appWindow = getCurrentWindow();
 const FINISHED_STORAGE_KEY = "velocitydl.finished.v1";
 const RESUME_STORAGE_KEY = "velocitydl.resume.v1";
+const ATTEMPT_HISTORY_STORAGE_KEY = "velocitydl.attempt-history.v1";
 const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
 const AddUrlModal = lazy(() =>
   import("./components/AddUrlModal").then((m) => ({ default: m.AddUrlModal }))
@@ -45,6 +51,15 @@ interface DownloadItem {
   category?: DownloadCategory;
   completed_at?: number;
   recovered?: boolean;
+  attempt_session_id?: string;
+  download_origin?: string;
+  browser_source?: string;
+  browser_confidence?: string;
+  browser_request_id?: string;
+  original_url?: string;
+  referrer?: string;
+  quality_label?: string;
+  bitrate_kbps?: number;
 }
 
 type DownloadCategory = 'video' | 'audio' | 'image' | 'document' | 'archive' | 'file';
@@ -59,6 +74,15 @@ interface PersistedFinishedDownload {
   category: DownloadCategory;
   completed_at: number;
   download_strategy?: string;
+  attempt_session_id?: string;
+  download_origin?: string;
+  browser_source?: string;
+  browser_confidence?: string;
+  browser_request_id?: string;
+  original_url?: string;
+  referrer?: string;
+  quality_label?: string;
+  bitrate_kbps?: number;
 }
 
 interface PersistedResumableDownload {
@@ -77,6 +101,15 @@ interface PersistedResumableDownload {
   status: 'paused' | 'active' | 'processing';
   completed_at?: number;
   saved_at: number;
+  attempt_session_id?: string;
+  download_origin?: string;
+  browser_source?: string;
+  browser_confidence?: string;
+  browser_request_id?: string;
+  original_url?: string;
+  referrer?: string;
+  quality_label?: string;
+  bitrate_kbps?: number;
 }
 
 interface AppSettings {
@@ -119,11 +152,14 @@ interface ExternalDownloadRequest {
   referrer?: string;
   source?: string;
   scan_auto_open_quality_picker?: boolean;
+  scan_capture_mode?: "quality_picker" | "current_stream";
   capture_type?: "page_url" | "direct_media_url" | "blob_backed_media";
   raw_media_url?: string;
   headers?: Record<string, string>;
   request_id?: string;
   wait_for_ack?: boolean;
+  original_url?: string;
+  browser_confidence?: "strong_direct" | "strong_manifest" | "ambiguous_media" | "page";
 }
 
 interface ExtensionHealth {
@@ -144,15 +180,71 @@ interface ExtensionHealthEvent {
   runtime_id?: string;
 }
 
+interface DownloadAttemptEvent {
+  session_id: string;
+  step_id: string;
+  label: string;
+  status: "running" | "succeeded" | "failed";
+  detail?: string;
+}
+
+interface AttemptStep {
+  stepId: string;
+  label: string;
+  status: "running" | "succeeded" | "failed";
+  detail?: string;
+  updatedAt: number;
+}
+
+interface AttemptSession {
+  id: string;
+  title: string;
+  url: string;
+  status: "running" | "succeeded" | "failed";
+  summary?: string;
+  steps: AttemptStep[];
+  updatedAt: number;
+}
+
+interface DeleteDialogState {
+  id: string;
+  title: string;
+  output_path: string;
+  audio_url?: string;
+  status: DownloadStatus;
+}
+
+type AddUrlLaunchSource = "manual" | "browser_capture" | "media_detected";
+type BrowserConfidence = NonNullable<ExternalDownloadRequest["browser_confidence"]>;
+type BrowserRouteClass =
+  | "auto_start_direct"
+  | "auto_start_manifest"
+  | "confirm_start"
+  | "rejected_invalid_url"
+  | "rejected_duplicate"
+  | "rejected_disabled"
+  | "capture_processing_failed";
+
+interface BrowserDownloadContext {
+  strategyHint?: "direct_file" | "hls_manifest" | "dash_manifest";
+  downloadOrigin?: "browser_takeover" | "manual" | "sniff_capture";
+  browserSource?: string;
+  browserConfidence?: BrowserConfidence;
+  browserRequestId?: string;
+  originalUrl?: string;
+  referrer?: string;
+  routeClass?: string;
+}
+
 type CaptureType = "page_url" | "direct_media_url" | "blob_backed_media";
 type CaptureDecision =
   | "opened_metadata_modal"
-  | "opened_metadata_modal_after_auto_queue_failure"
-  | "auto_queued_direct"
+  | "auto_started_direct"
+  | "auto_started_manifest"
   | "ignored_invalid_url"
   | "ignored_by_setting"
   | "ignored_duplicate"
-  | "auto_queue_failed";
+  | "capture_processing_failed";
 
 interface CaptureDebugEntry {
   id: string;
@@ -169,6 +261,7 @@ const DIRECT_FILE_EXT_RE =
   /\.(exe|msi|msix|msixbundle|appx|appxbundle|zip|rar|7z|tar|gz|bz2|xz|iso|img|dmg|pkg|deb|rpm|apk|ipa|jar|pdf|doc|docx|xls|xlsx|ppt|pptx|csv|json|xml|txt|rtf|epub)(?:$|[?#])/i;
 const AUTO_CAPTURE_DEDUPE_WINDOW_MS = 90_000;
 const DEFAULT_THREAD_COUNT = 16;
+const REFRESH_RESUME_DELAY_MS = 900;
 const ACTIVE_DOWNLOAD_STATUSES: DownloadStatus[] = ["active", "paused", "processing"];
 const RUNNING_DOWNLOAD_STATUSES: DownloadStatus[] = ["active", "processing"];
 
@@ -239,7 +332,8 @@ const isYouTubePageUrl = (url?: string) => {
   }
 };
 
-const extractFilenameFromUrl = (url: string) => {
+const extractFilenameFromUrl = (url?: string) => {
+  if (!url) return null;
   try {
     const parsed = new URL(url);
     const leaf = parsed.pathname.split("/").pop() || "";
@@ -248,6 +342,20 @@ const extractFilenameFromUrl = (url: string) => {
   } catch {
     return null;
   }
+};
+
+const pickBrowserConfidence = (
+  payload: ExternalDownloadRequest,
+  effectiveUrl: string,
+  preferredManifestUrl: string | null,
+  referrerUrl: string
+): BrowserConfidence => {
+  if (payload.browser_confidence) return payload.browser_confidence;
+  if (isYouTubePageUrl(referrerUrl)) return "ambiguous_media";
+  if (preferredManifestUrl || isManifestLikeUrl(effectiveUrl)) return "strong_manifest";
+  if (isClearlyDirectMedia(effectiveUrl)) return "strong_direct";
+  if (payload.capture_type === "page_url" || payload.source === "chromium-context-page") return "page";
+  return "ambiguous_media";
 };
 
 const normalizeComparableUrl = (url?: string) => {
@@ -314,6 +422,9 @@ function App() {
   const [isExtensionSetupOpen, setIsExtensionSetupOpen] = useState(false);
   const [initialUrl, setInitialUrl] = useState("");
   const [initialHeaders, setInitialHeaders] = useState<Record<string, string> | undefined>(undefined);
+  const [initialAttemptSessionId, setInitialAttemptSessionId] = useState<string | undefined>(undefined);
+  const [initialDownloadContext, setInitialDownloadContext] = useState<BrowserDownloadContext | undefined>(undefined);
+  const [addUrlLaunchSource, setAddUrlLaunchSource] = useState<AddUrlLaunchSource>("manual");
   const [searchTerm, setSearchTerm] = useState("");
   const [developerModeEnabled, setDeveloperModeEnabled] = useState(false);
   const [showCaptureDebug, setShowCaptureDebug] = useState(false);
@@ -324,11 +435,18 @@ function App() {
   const [showWelcomeSetup, setShowWelcomeSetup] = useState(false);
   const [extensionHealth, setExtensionHealth] = useState<ExtensionHealth | null>(null);
   const [extensionStatusMessage, setExtensionStatusMessage] = useState("");
+  const [attemptSessions, setAttemptSessions] = useState<Record<string, AttemptSession>>({});
+  const [activeAttemptId, setActiveAttemptId] = useState<string | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState | null>(null);
+  const [deleteFromDisk, setDeleteFromDisk] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const downloadsRef = useRef<DownloadItem[]>([]);
+  const refreshStateRef = useRef<Record<string, DownloadRefreshRuntimeState>>({});
   const recentAutoCapturesRef = useRef<Map<string, number>>(new Map());
+  const attemptCloseTimersRef = useRef<Map<string, number>>(new Map());
   const deferredSearchTerm = useDeferredValue(searchTerm.trim().toLowerCase());
 
   useEffect(() => {
@@ -336,7 +454,151 @@ function App() {
   }, [downloads]);
 
   useEffect(() => {
+    const now = Date.now();
+    const nextState: Record<string, DownloadRefreshRuntimeState> = {};
+
+    for (const download of downloads) {
+      const previous = refreshStateRef.current[download.id];
+      const observedAt = now;
+      const lastProgressAt =
+        previous && download.progress <= previous.lastProgressValue
+          ? previous.lastProgressAt
+          : observedAt;
+      const lastNonZeroSpeedAt =
+        previous && isZeroLikeSpeed(download.speed)
+          ? previous.lastNonZeroSpeedAt
+          : observedAt;
+
+      nextState[download.id] = {
+        lastObservedAt: observedAt,
+        lastProgressValue: download.progress,
+        lastProgressAt,
+        lastNonZeroSpeedAt,
+        autoRefreshCount: previous?.autoRefreshCount ?? 0,
+        refreshInFlight:
+          previous?.refreshInFlight === true &&
+          download.status !== "paused" &&
+          download.status !== "error",
+        lastRefreshAt: previous?.lastRefreshAt,
+      };
+    }
+
+    refreshStateRef.current = nextState;
+  }, [downloads]);
+
+  const beginAttemptSession = useCallback((title: string, url: string) => {
+    const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setAttemptSessions((prev) => ({
+      ...prev,
+      [sessionId]: {
+        id: sessionId,
+        title,
+        url,
+        status: "running",
+        steps: [],
+        updatedAt: Date.now(),
+      },
+    }));
+    setActiveAttemptId(sessionId);
+    return sessionId;
+  }, []);
+
+  const pushAttemptStep = useCallback(
+    (
+      sessionId: string,
+      stepId: string,
+      label: string,
+      status: AttemptStep["status"],
+      detail?: string
+    ) => {
+      setAttemptSessions((prev) => {
+        const current = prev[sessionId];
+        if (!current) return prev;
+        const nextStep: AttemptStep = {
+          stepId,
+          label,
+          status,
+          detail,
+          updatedAt: Date.now(),
+        };
+        const existingIndex = current.steps.findIndex((step) => step.stepId === stepId);
+        const nextSteps =
+          existingIndex >= 0
+            ? current.steps.map((step, index) => (index === existingIndex ? nextStep : step))
+            : [...current.steps, nextStep];
+        return {
+          ...prev,
+          [sessionId]: {
+            ...current,
+            status:
+              status === "failed"
+                ? "failed"
+                : current.status === "failed"
+                  ? current.status
+                  : "running",
+            steps: nextSteps,
+            updatedAt: Date.now(),
+          },
+        };
+      });
+    },
+    []
+  );
+
+  const finalizeAttemptSession = useCallback(
+    (sessionId: string, status: AttemptSession["status"], summary?: string, autoCloseMs?: number) => {
+      setAttemptSessions((prev) => {
+        const current = prev[sessionId];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [sessionId]: {
+            ...current,
+            status,
+            summary: summary ?? current.summary,
+            updatedAt: Date.now(),
+          },
+        };
+      });
+
+      const existing = attemptCloseTimersRef.current.get(sessionId);
+      if (existing) {
+        window.clearTimeout(existing);
+        attemptCloseTimersRef.current.delete(sessionId);
+      }
+
+      if (autoCloseMs) {
+        const timer = window.setTimeout(() => {
+          setActiveAttemptId((current) => (current === sessionId ? null : current));
+          attemptCloseTimersRef.current.delete(sessionId);
+        }, autoCloseMs);
+        attemptCloseTimersRef.current.set(sessionId, timer);
+      }
+    },
+    []
+  );
+
+  const closeAttemptDialog = useCallback(() => {
+    if (!activeAttemptId) return;
+    const timer = attemptCloseTimersRef.current.get(activeAttemptId);
+    if (timer) {
+      window.clearTimeout(timer);
+      attemptCloseTimersRef.current.delete(activeAttemptId);
+    }
+    setActiveAttemptId(null);
+  }, [activeAttemptId]);
+
+  useEffect(() => {
     installConsoleDiagnostics();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of attemptCloseTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      attemptCloseTimersRef.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -397,6 +659,7 @@ function App() {
     try {
       const finishedRaw = localStorage.getItem(FINISHED_STORAGE_KEY);
       const resumableRaw = localStorage.getItem(RESUME_STORAGE_KEY);
+      const attemptsRaw = localStorage.getItem(ATTEMPT_HISTORY_STORAGE_KEY);
 
       const restoredFinished: DownloadItem[] = finishedRaw
         ? (JSON.parse(finishedRaw) as PersistedFinishedDownload[])
@@ -418,6 +681,15 @@ function App() {
               completed_at: item.completed_at,
               recovered: false,
               download_strategy: item.download_strategy,
+              attempt_session_id: item.attempt_session_id,
+              download_origin: item.download_origin,
+              browser_source: item.browser_source,
+              browser_confidence: item.browser_confidence,
+              browser_request_id: item.browser_request_id,
+              original_url: item.original_url,
+              referrer: item.referrer,
+              quality_label: item.quality_label,
+              bitrate_kbps: item.bitrate_kbps,
             }))
         : [];
 
@@ -446,8 +718,21 @@ function App() {
               completed_at: item.completed_at,
               recovered: true,
               download_strategy: item.download_strategy,
+              attempt_session_id: item.attempt_session_id,
+              download_origin: item.download_origin,
+              browser_source: item.browser_source,
+              browser_confidence: item.browser_confidence,
+              browser_request_id: item.browser_request_id,
+              original_url: item.original_url,
+              referrer: item.referrer,
+              quality_label: item.quality_label,
+              bitrate_kbps: item.bitrate_kbps,
             }))
         : [];
+
+      const restoredAttempts = attemptsRaw
+        ? (JSON.parse(attemptsRaw) as Record<string, AttemptSession>)
+        : {};
 
       const merged: DownloadItem[] = [...restoredFinished];
       for (const resumable of restoredResumables) {
@@ -457,6 +742,7 @@ function App() {
       }
 
       setDownloads(merged);
+      setAttemptSessions(restoredAttempts);
     } catch (error) {
       console.error("Failed to restore downloads from persistence", error);
     } finally {
@@ -468,13 +754,20 @@ function App() {
       const url = typeof capture === 'string' ? capture : capture.url;
       setInitialHeaders(undefined);
       setInitialUrl(url);
+      setInitialAttemptSessionId(undefined);
+      setInitialDownloadContext(undefined);
+      setAddUrlLaunchSource("media_detected");
       setIsAddUrlOpen(true);
     });
     const unlistenExternal = listen<ExternalDownloadRequest>("external_download_request", async (event) => {
       const payload = event.payload;
       const requestId = payload.request_id;
       let ackSent = false;
-      const ackRequest = async (accepted: boolean, message: string) => {
+      const ackRequest = async (
+        accepted: boolean,
+        message: string,
+        routeClass?: BrowserRouteClass
+      ) => {
         if (!requestId || ackSent) return;
         ackSent = true;
         try {
@@ -482,6 +775,7 @@ function App() {
             requestId,
             accepted,
             message,
+            routeClass,
           });
         } catch (ackError) {
           console.error("Failed to acknowledge external capture request", ackError);
@@ -503,6 +797,12 @@ function App() {
         rawHttpMediaUrl ||
         (isLikelyDirectFromUrlMismatch ? payloadUrl : null);
       const effectiveUrl = preferredManifestUrl || scanDirectCandidateUrl || payload.url;
+      const browserConfidence = pickBrowserConfidence(
+        payload,
+        effectiveUrl || "",
+        preferredManifestUrl,
+        referrerUrl
+      );
       const recordCapture = (decision: CaptureDecision) => {
         setCaptureDebugEntries((prev) => [
           {
@@ -520,7 +820,7 @@ function App() {
 
       if (!effectiveUrl?.startsWith("http")) {
         recordCapture("ignored_invalid_url");
-        await ackRequest(false, "Invalid capture URL");
+        await ackRequest(false, "Invalid capture URL", "rejected_invalid_url");
         return;
       }
 
@@ -534,7 +834,7 @@ function App() {
       const seenAt = recentAutoCapturesRef.current.get(dedupeKey);
       if (seenAt && now - seenAt < AUTO_CAPTURE_DEDUPE_WINDOW_MS) {
         recordCapture("ignored_duplicate");
-        await ackRequest(false, "Duplicate capture ignored");
+        await ackRequest(false, "Duplicate capture ignored", "rejected_duplicate");
         return;
       }
 
@@ -547,7 +847,7 @@ function App() {
       if (hasActiveSameUrl) {
         recentAutoCapturesRef.current.set(dedupeKey, now);
         recordCapture("ignored_duplicate");
-        await ackRequest(false, "Matching active download already exists");
+        await ackRequest(false, "Matching active download already exists", "rejected_duplicate");
         return;
       }
 
@@ -555,110 +855,160 @@ function App() {
         const settings = await invoke<AppSettings>("get_settings");
         if (!settings.accept_browser_download_requests) {
           recordCapture("ignored_by_setting");
-          await ackRequest(false, "Browser captures disabled in app settings");
+          await ackRequest(false, "Browser captures disabled in app settings", "rejected_disabled");
           return;
         }
+        const sessionTitle =
+          payload.filename ||
+          extractFilenameFromUrl(effectiveUrl) ||
+          extractFilenameFromUrl(payload.original_url || payload.url) ||
+          "browser_capture";
+        const attemptSessionId = beginAttemptSession(sessionTitle, effectiveUrl);
+        pushAttemptStep(
+          attemptSessionId,
+          "browser_handoff_received",
+          "Receive browser handoff",
+          "succeeded",
+          `${payload.source || "unknown"} | confidence=${browserConfidence}`
+        );
 
-        const isScanCapture = payload.source === "chromium-scan-overlay";
-        const isDownloadsApiCapture = payload.source === "chromium-downloads-api";
-        const scanAutoOpenQualityPicker = payload.scan_auto_open_quality_picker !== false;
-        const shouldPreferYouTubeMetadata =
-          isYouTubePageUrl(referrerUrl) ||
-          isYouTubePageUrl(payloadUrl) ||
-          ((payloadUrl.includes("googlevideo.com") || payloadUrl.includes("videoplayback")) &&
-            isYouTubePageUrl(referrerUrl));
-        const hasConcreteDirectStream =
-          (!!rawHttpMediaUrl && !preferredManifestUrl) ||
-          isLikelyDirectFromUrlMismatch ||
-          (isClearlyDirectMedia(effectiveUrl) && !isManifestLikeUrl(effectiveUrl));
-        const prefersCurrentStreamDirectQueue =
-          isScanCapture &&
-          !preferredManifestUrl &&
-          hasConcreteDirectStream;
+        const baseContext: BrowserDownloadContext = {
+          downloadOrigin: "browser_takeover",
+          browserSource: payload.source,
+          browserConfidence,
+          browserRequestId: requestId,
+          originalUrl: payload.original_url || payload.url,
+          referrer: payload.referrer,
+        };
         const openMetadataModal = (
           modalUrl: string,
-          decision: CaptureDecision = "opened_metadata_modal"
+          routeClass: BrowserRouteClass = "confirm_start"
         ) => {
           setInitialHeaders(isYouTubePageUrl(modalUrl) ? undefined : payload.headers);
           setInitialUrl(modalUrl);
+          setInitialAttemptSessionId(attemptSessionId);
+          setInitialDownloadContext({
+            ...baseContext,
+            routeClass,
+            strategyHint:
+              browserConfidence === "strong_manifest"
+                ? preferredManifestUrl?.toLowerCase().includes(".mpd")
+                  ? "dash_manifest"
+                  : "hls_manifest"
+                : undefined,
+          });
+          setAddUrlLaunchSource("browser_capture");
           setIsAddUrlOpen(true);
-          recordCapture(decision);
-        };
-
-        const tryAutoQueueDirect = async (targetUrl: string) => {
-          const fallbackTitle =
-            payload.filename ||
-            extractFilenameFromUrl(targetUrl) ||
-            extractFilenameFromUrl(payload.url) ||
-            "browser_capture";
-          const queued = await handleAddDownload(
-            targetUrl,
-            settings.default_download_path,
-            fallbackTitle,
-            undefined,
-            payload.headers
+          pushAttemptStep(
+            attemptSessionId,
+            "route_selected",
+            "Select browser takeover route",
+            "succeeded",
+            routeClass
           );
-          if (queued) {
-            recentAutoCapturesRef.current.set(dedupeKey, now);
-            recordCapture("auto_queued_direct");
-            await ackRequest(true, "Download accepted by app");
-            return true;
-          }
-          recordCapture("auto_queue_failed");
-          await ackRequest(false, "App failed to queue download");
-          return false;
+          recordCapture("opened_metadata_modal");
         };
 
-        // Methodical flow for extension capture:
-        // 1) Scan-overlay captures should prefer the exact currently playing stream.
-        // 2) Page/blob captures open metadata modal unless we already resolved a direct stream.
-        // 3) If direct queueing fails, fall back to metadata modal.
-        // 4) Otherwise treat as direct candidate -> direct queue, fallback to modal.
-        if (shouldPreferYouTubeMetadata) {
-          openMetadataModal(referrerUrl || payloadUrl, "opened_metadata_modal");
-          await ackRequest(false, "Opened metadata flow instead of direct takeover");
-          return;
-        }
+        const shouldPreferPicker =
+          shouldOpenPickerForBrowserCapture({
+            source: payload.source,
+            browserConfidence,
+            scanCaptureMode: payload.scan_capture_mode,
+            scanAutoOpenQualityPicker: payload.scan_auto_open_quality_picker,
+          });
 
-        if (prefersCurrentStreamDirectQueue) {
-          const queued = await tryAutoQueueDirect(effectiveUrl);
+        const autoStart = async (
+          routeClass: BrowserRouteClass,
+          strategyHint: NonNullable<BrowserDownloadContext["strategyHint"]>
+        ) => {
+          pushAttemptStep(
+            attemptSessionId,
+            "route_selected",
+            "Select browser takeover route",
+            "succeeded",
+            routeClass
+          );
+          const queued = await handleAddDownload(
+            effectiveUrl,
+            settings.default_download_path,
+            payload.filename || undefined,
+            undefined,
+            payload.headers,
+            undefined,
+            undefined,
+            undefined,
+            attemptSessionId,
+            undefined,
+            {
+              ...baseContext,
+              routeClass,
+              strategyHint,
+            }
+          );
           if (!queued) {
-            openMetadataModal(
-              effectiveUrl,
-              "opened_metadata_modal_after_auto_queue_failure"
+            openMetadataModal(effectiveUrl, "confirm_start");
+            await ackRequest(
+              true,
+              "Direct auto-start failed. Review and start from VelocityDL.",
+              "confirm_start"
             );
+            return;
           }
-          return;
-        }
-
-        if (isDownloadsApiCapture) {
-          const queued = await tryAutoQueueDirect(effectiveUrl);
-          if (!queued) {
-            openMetadataModal(effectiveUrl, "opened_metadata_modal_after_auto_queue_failure");
+          if (
+            shouldRevealAppForBrowserHandoff({
+              source: payload.source,
+              routeClass,
+            })
+          ) {
+            invoke("reveal_main_window").catch((error) => {
+              console.error("Failed to reveal main window for browser handoff", error);
+            });
           }
+          recentAutoCapturesRef.current.set(dedupeKey, now);
+          recordCapture(
+            routeClass === "auto_start_manifest"
+              ? "auto_started_manifest"
+              : "auto_started_direct"
+          );
+          await ackRequest(true, "Download started in VelocityDL.", routeClass);
+        };
+
+        if (browserConfidence === "strong_direct") {
+          if (shouldPreferPicker) {
+            openMetadataModal(referrerUrl || payload.original_url || payload.url, "confirm_start");
+            recentAutoCapturesRef.current.set(dedupeKey, now);
+            await ackRequest(
+              true,
+              "Capture received. Review quality in VelocityDL before starting.",
+              "confirm_start"
+            );
+            return;
+          }
+          await autoStart("auto_start_direct", "direct_file");
           return;
         }
 
-        if (captureType === "page_url" || captureType === "blob_backed_media") {
-          openMetadataModal(scanDirectCandidateUrl || payload.url, "opened_metadata_modal");
-          await ackRequest(false, "Opened metadata flow instead of direct takeover");
+        if (browserConfidence === "strong_manifest") {
+          const strategyHint =
+            preferredManifestUrl?.toLowerCase().includes(".mpd") ? "dash_manifest" : "hls_manifest";
+          await autoStart("auto_start_manifest", strategyHint);
           return;
         }
 
-        if (isScanCapture && scanAutoOpenQualityPicker && !isClearlyDirectMedia(effectiveUrl)) {
-          openMetadataModal(scanDirectCandidateUrl || payload.url, "opened_metadata_modal");
-          await ackRequest(false, "Opened metadata flow instead of direct takeover");
+        if (browserConfidence === "ambiguous_media") {
+          openMetadataModal(referrerUrl || effectiveUrl, "confirm_start");
+          recentAutoCapturesRef.current.set(dedupeKey, now);
+          await ackRequest(true, "Capture received. Start Download in VelocityDL to continue.", "confirm_start");
           return;
         }
 
-        const queued = await tryAutoQueueDirect(effectiveUrl);
-        if (!queued) {
-          openMetadataModal(effectiveUrl, "opened_metadata_modal_after_auto_queue_failure");
-        }
+        openMetadataModal(scanDirectCandidateUrl || payload.url, "confirm_start");
+        recentAutoCapturesRef.current.set(dedupeKey, now);
+        await ackRequest(true, "Capture received. Start Download in VelocityDL to continue.", "confirm_start");
       } catch (e) {
         console.error("Failed to process browser extension capture", e);
-        recordCapture("auto_queue_failed");
-        await ackRequest(false, "App capture processing failed");
+        recordCapture("capture_processing_failed");
+        await ackRequest(false, "App capture processing failed", "capture_processing_failed");
       }
     });
 
@@ -677,6 +1027,39 @@ function App() {
         }
         return next;
       }));
+    });
+    const unlistenAttempt = listen<DownloadAttemptEvent>("download_attempt", (event) => {
+      const payload = event.payload;
+      setAttemptSessions((prev) => {
+        const current = prev[payload.session_id];
+        if (!current) return prev;
+        const existingIndex = current.steps.findIndex((step) => step.stepId === payload.step_id);
+        const nextStep: AttemptStep = {
+          stepId: payload.step_id,
+          label: payload.label,
+          status: payload.status,
+          detail: payload.detail,
+          updatedAt: Date.now(),
+        };
+        const nextSteps =
+          existingIndex >= 0
+            ? current.steps.map((step, index) => (index === existingIndex ? nextStep : step))
+            : [...current.steps, nextStep];
+        return {
+          ...prev,
+          [payload.session_id]: {
+            ...current,
+            status:
+              payload.status === "failed"
+                ? "failed"
+                : current.status === "failed"
+                  ? current.status
+                  : "running",
+            steps: nextSteps,
+            updatedAt: Date.now(),
+          },
+        };
+      });
     });
     const unlistenExtensionHealth = listen<ExtensionHealthEvent>("extension_health_changed", (event) => {
       setExtensionHealth((prev) => {
@@ -710,6 +1093,7 @@ function App() {
       unlistenMedia.then(f => f());
       unlistenExternal.then(f => f());
       unlistenProgress.then(f => f());
+      unlistenAttempt.then(f => f());
       unlistenExtensionHealth.then(f => f());
     };
   }, [maxThreads]);
@@ -728,6 +1112,15 @@ function App() {
           category: d.category || inferCategory(d.title || d.url),
           completed_at: d.completed_at as number,
           download_strategy: d.download_strategy,
+          attempt_session_id: d.attempt_session_id,
+          download_origin: d.download_origin,
+          browser_source: d.browser_source,
+          browser_confidence: d.browser_confidence,
+          browser_request_id: d.browser_request_id,
+          original_url: d.original_url,
+          referrer: d.referrer,
+          quality_label: d.quality_label,
+          bitrate_kbps: d.bitrate_kbps,
         }));
       localStorage.setItem(FINISHED_STORAGE_KEY, JSON.stringify(finishedToPersist));
 
@@ -751,12 +1144,22 @@ function App() {
           status: d.status === "paused" ? "paused" : "active",
           completed_at: d.completed_at,
           saved_at: Date.now(),
+          attempt_session_id: d.attempt_session_id,
+          download_origin: d.download_origin,
+          browser_source: d.browser_source,
+          browser_confidence: d.browser_confidence,
+          browser_request_id: d.browser_request_id,
+          original_url: d.original_url,
+          referrer: d.referrer,
+          quality_label: d.quality_label,
+          bitrate_kbps: d.bitrate_kbps,
         }));
       localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(resumableToPersist));
+      localStorage.setItem(ATTEMPT_HISTORY_STORAGE_KEY, JSON.stringify(attemptSessions));
     } catch (error) {
       console.error("Failed to persist downloads", error);
     }
-  }, [downloads, hydrated]);
+  }, [downloads, hydrated, attemptSessions]);
 
   useEffect(() => {
     setDownloads((prev) =>
@@ -776,8 +1179,12 @@ function App() {
     headers?: Record<string, string>,
     audioUrl?: string,
     audioSize?: number,
-    audioHeaders?: Record<string, string>
+    audioHeaders?: Record<string, string>,
+    attemptSessionId?: string,
+    qualityMetadata?: DownloadQualityBadgeInput,
+    downloadContext?: BrowserDownloadContext
   ) => {
+    const sessionId = attemptSessionId || beginAttemptSession(title || "Preparing download", url);
     try {
       const newDownload = await invoke<DownloadItem>("add_download", { 
         url, 
@@ -787,17 +1194,37 @@ function App() {
         totalSize: size,
         audioSize,
         headers,
-        audioHeaders
+        audioHeaders,
+        attemptSessionId: sessionId,
+        strategyHint: downloadContext?.strategyHint,
+        downloadOrigin: downloadContext?.downloadOrigin,
+        browserSource: downloadContext?.browserSource,
+        browserConfidence: downloadContext?.browserConfidence,
+        browserRequestId: downloadContext?.browserRequestId,
+        originalUrl: downloadContext?.originalUrl,
+        referrer: downloadContext?.referrer,
       });
       newDownload.category = inferCategory(title || url);
       newDownload.segments = createIdleSegments(maxThreads);
+      newDownload.attempt_session_id = sessionId;
+      newDownload.download_origin = downloadContext?.downloadOrigin;
+      newDownload.browser_source = downloadContext?.browserSource;
+      newDownload.browser_confidence = downloadContext?.browserConfidence;
+      newDownload.browser_request_id = downloadContext?.browserRequestId;
+      newDownload.original_url = downloadContext?.originalUrl;
+      newDownload.referrer = downloadContext?.referrer;
+      newDownload.quality_label = qualityMetadata?.qualityLabel;
+      newDownload.bitrate_kbps = qualityMetadata?.bitrateKbps;
       setDownloads(prev => [...prev, newDownload]);
+      finalizeAttemptSession(sessionId, "succeeded", `Queued ${newDownload.title}`, 1400);
       return true;
     } catch (error) {
       console.error("Failed to add download:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      finalizeAttemptSession(sessionId, "failed", message);
       return false;
     }
-  }, [maxThreads]);
+  }, [beginAttemptSession, finalizeAttemptSession, maxThreads]);
 
   const handlePause = useCallback(async (id: string) => {
     try {
@@ -806,13 +1233,16 @@ function App() {
     } catch (e) { console.error(e); }
   }, []);
 
-  const handleResume = useCallback(async (id: string) => {
+  const resumeDownloadFromSnapshot = useCallback(async (
+    paused: DownloadItem,
+    attemptTitle: string
+  ) => {
+    let attemptSessionId: string | null = null;
     try {
-      const paused = downloads.find(d => d.id === id);
-      if (!paused) return;
+      attemptSessionId = beginAttemptSession(paused.title || attemptTitle, paused.url);
 
       const restarted = await invoke<DownloadItem>("add_download", {
-        existingId: id,
+        existingId: paused.id,
         url: paused.url,
         audioUrl: paused.audio_url ?? null,
         outputPath: paused.output_path,
@@ -821,13 +1251,101 @@ function App() {
         audioSize: paused.audio_size ?? null,
         headers: paused.headers ?? null,
         audioHeaders: paused.audio_headers ?? null,
+        attemptSessionId,
+        strategyHint: paused.download_strategy ?? null,
+        downloadOrigin: paused.download_origin ?? null,
+        browserSource: paused.browser_source ?? null,
+        browserConfidence: paused.browser_confidence ?? null,
+        browserRequestId: paused.browser_request_id ?? null,
+        originalUrl: paused.original_url ?? null,
+        referrer: paused.referrer ?? null,
       });
 
       restarted.category = paused.category || inferCategory(paused.title || paused.url);
       restarted.segments = paused.segments?.length ? paused.segments : createIdleSegments(maxThreads);
-      setDownloads(prev => prev.map(d => d.id === id ? { ...d, ...restarted, status: 'active', progress: d.progress, recovered: false } : d));
-    } catch (e) { console.error(e); }
-  }, [downloads, maxThreads]);
+      restarted.attempt_session_id = attemptSessionId;
+      restarted.download_origin = paused.download_origin;
+      restarted.browser_source = paused.browser_source;
+      restarted.browser_confidence = paused.browser_confidence;
+      restarted.browser_request_id = paused.browser_request_id;
+      restarted.original_url = paused.original_url;
+      restarted.referrer = paused.referrer;
+      restarted.quality_label = paused.quality_label;
+      restarted.bitrate_kbps = paused.bitrate_kbps;
+      setDownloads(prev => prev.map(d => d.id === paused.id ? { ...d, ...restarted, status: 'active', progress: d.progress, recovered: false } : d));
+      finalizeAttemptSession(attemptSessionId, "succeeded", `Queued ${restarted.title}`, 1400);
+      return true;
+    } catch (e) {
+      console.error(e);
+      if (attemptSessionId) {
+        const message = e instanceof Error ? e.message : String(e);
+        finalizeAttemptSession(attemptSessionId, "failed", message);
+      }
+      return false;
+    }
+  }, [beginAttemptSession, finalizeAttemptSession, maxThreads]);
+
+  const handleResume = useCallback(async (id: string) => {
+    const paused = downloadsRef.current.find(d => d.id === id);
+    if (!paused) return;
+    await resumeDownloadFromSnapshot(paused, "Resume download");
+  }, [resumeDownloadFromSnapshot]);
+
+  const handleRefreshDownload = useCallback(async (id: string, automatic = false) => {
+    const target = downloadsRef.current.find(d => d.id === id);
+    if (!target || (target.status !== "active" && target.status !== "paused")) {
+      return;
+    }
+
+    const previous = refreshStateRef.current[id];
+    if (previous?.refreshInFlight) {
+      return;
+    }
+
+    const now = Date.now();
+    refreshStateRef.current[id] = {
+      lastObservedAt: now,
+      lastProgressValue: target.progress,
+      lastProgressAt: now,
+      lastNonZeroSpeedAt: now,
+      autoRefreshCount: automatic ? (previous?.autoRefreshCount ?? 0) + 1 : (previous?.autoRefreshCount ?? 0),
+      refreshInFlight: true,
+      lastRefreshAt: now,
+    };
+
+    if (automatic) {
+      setDiagnosticStatus(`Refreshing stalled download: ${target.title}`);
+    }
+
+    try {
+      if (target.status === "active") {
+        await invoke("pause_download", { id });
+        setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: "paused", speed: "0 B/s" } : d));
+        await new Promise((resolve) => window.setTimeout(resolve, REFRESH_RESUME_DELAY_MS));
+      }
+
+      await resumeDownloadFromSnapshot(
+        { ...target, status: "paused", speed: "0 B/s" },
+        automatic ? "Auto-refresh stalled download" : "Refresh download"
+      );
+    } catch (error) {
+      console.error("Failed to refresh download", error);
+    } finally {
+      const latest = refreshStateRef.current[id];
+      if (latest) {
+        refreshStateRef.current[id] = {
+          ...latest,
+          refreshInFlight: false,
+          lastObservedAt: Date.now(),
+          lastProgressAt: Date.now(),
+          lastNonZeroSpeedAt: Date.now(),
+        };
+      }
+      if (automatic) {
+        window.setTimeout(() => setDiagnosticStatus(""), 1800);
+      }
+    }
+  }, [resumeDownloadFromSnapshot]);
 
   const handleOpenFolder = useCallback(async (id: string) => {
     const download = downloads.find(d => d.id === id);
@@ -841,7 +1359,28 @@ function App() {
     }
   }, [downloads]);
 
-  const handleDelete = useCallback(async (id: string) => {
+  const handleDelete = useCallback((id: string) => {
+    const target = downloadsRef.current.find(d => d.id === id);
+    if (!target) return;
+    setDeleteDialog({
+      id: target.id,
+      title: target.title,
+      output_path: target.output_path,
+      audio_url: target.audio_url,
+      status: target.status,
+    });
+    setDeleteFromDisk(false);
+  }, []);
+
+  const closeDeleteDialog = useCallback(() => {
+    if (deleteBusy) return;
+    setDeleteDialog(null);
+    setDeleteFromDisk(false);
+  }, [deleteBusy]);
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleteDialog) return;
+    const id = deleteDialog.id;
     const target = downloads.find(d => d.id === id);
     if (target && (target.status === "active" || target.status === "paused" || target.status === "processing")) {
       try {
@@ -850,11 +1389,58 @@ function App() {
         console.error("Failed to stop download before removing", e);
       }
     }
+    setDeleteBusy(true);
+    try {
+      if (deleteFromDisk) {
+        await invoke("delete_download_artifacts", {
+          outputPath: deleteDialog.output_path,
+          title: deleteDialog.title,
+          hasAudioTrack: !!deleteDialog.audio_url,
+        });
+      }
+    if (target?.attempt_session_id) {
+      setAttemptSessions(prev => {
+        const next = { ...prev };
+        delete next[target.attempt_session_id as string];
+        return next;
+      });
+    }
     setDownloads(prev => prev.filter(d => d.id !== id));
-  }, [downloads]);
+      setDeleteDialog(null);
+      setDeleteFromDisk(false);
+    } catch (error) {
+      console.error("Failed to delete download", error);
+      setDiagnosticStatus("Failed to remove download files");
+      window.setTimeout(() => setDiagnosticStatus(""), 2200);
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [deleteDialog, deleteFromDisk, downloads]);
+
+  const handleShowAttemptDetails = useCallback((sessionId?: string) => {
+    if (!sessionId) return;
+    setActiveAttemptId(sessionId);
+  }, []);
 
   const clearFinished = useCallback(() => {
-    setDownloads(prev => prev.filter(d => d.status !== 'finished'));
+    setDownloads(prev => {
+      const finishedSessionIds = prev
+        .filter(d => d.status === 'finished')
+        .map(d => d.attempt_session_id)
+        .filter((id): id is string => !!id);
+
+      if (finishedSessionIds.length) {
+        setAttemptSessions(current => {
+          const next = { ...current };
+          for (const sessionId of finishedSessionIds) {
+            delete next[sessionId];
+          }
+          return next;
+        });
+      }
+
+      return prev.filter(d => d.status !== 'finished');
+    });
   }, []);
 
   const handleCopyDiagnostics = useCallback(async (context?: string) => {
@@ -910,6 +1496,21 @@ function App() {
     window.setTimeout(() => setExtensionStatusMessage(""), 2200);
   }, [refreshExtensionHealth]);
 
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const stalled = downloadsRef.current.find((download) =>
+        shouldAutoRefreshDownload(download, refreshStateRef.current[download.id], now)
+      );
+      if (!stalled) return;
+      void handleRefreshDownload(stalled.id, true);
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [handleRefreshDownload, hydrated]);
+
   const filteredDownloads = useMemo(() => {
     const normalizedSearch = deferredSearchTerm;
 
@@ -948,20 +1549,84 @@ function App() {
       { activeCount: 0, runningCount: 0, finishedCount: 0, totalSpeedBytes: 0 }
     );
   }, [downloads]);
+  const activeAttemptSession = activeAttemptId ? attemptSessions[activeAttemptId] ?? null : null;
 
   return (
     <div className="flex h-screen bg-background text-white select-none overflow-hidden font-sans text-[13px] border border-border">
       {/* Modals */}
+      <DownloadAttemptDialog session={activeAttemptSession} onClose={closeAttemptDialog} />
+      {deleteDialog && (
+        <div className="fixed inset-0 z-[65] flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="Close delete dialog"
+            onClick={closeDeleteDialog}
+            className="absolute inset-0 bg-black/65 backdrop-blur-sm"
+          />
+          <div className="relative z-10 w-full max-w-md rounded-xl border border-border bg-surface shadow-2xl">
+            <div className="border-b border-border px-5 py-4">
+              <div className="text-sm font-semibold text-gray-100">Remove Download</div>
+              <div className="mt-1 truncate text-xs text-gray-400">{deleteDialog.title}</div>
+            </div>
+            <div className="space-y-4 px-5 py-4">
+              <div className="text-sm leading-6 text-gray-300">
+                Remove this item from VelocityDL. You can also delete the downloaded file and known temporary parts from disk.
+              </div>
+              <label className="flex items-start gap-3 rounded border border-border bg-background/40 px-3 py-3 text-sm text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={deleteFromDisk}
+                  onChange={(e) => setDeleteFromDisk(e.target.checked)}
+                  className="mt-0.5"
+                  disabled={deleteBusy}
+                />
+                <span>
+                  Delete downloaded file from disk too
+                  <span className="mt-1 block text-[11px] text-gray-500">
+                    This also removes known VelocityDL temporary parts for this item when present.
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-4">
+              <button
+                type="button"
+                onClick={closeDeleteDialog}
+                className="rounded border border-border px-3 py-1.5 text-sm text-gray-300 hover:bg-white/5"
+                disabled={deleteBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                className="rounded bg-error/90 px-3 py-1.5 text-sm text-white hover:bg-error"
+                disabled={deleteBusy}
+              >
+                {deleteBusy ? "Removing..." : deleteFromDisk ? "Delete From Disk" : "Remove From List"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {isAddUrlOpen && (
         <Suspense fallback={null}>
           <AddUrlModal 
             isOpen={isAddUrlOpen} 
             initialUrl={initialUrl}
             initialHeaders={initialHeaders}
+            initialAttemptSessionId={initialAttemptSessionId}
+            initialDownloadContext={initialDownloadContext}
+            launchSource={addUrlLaunchSource}
+            onAttemptStart={beginAttemptSession}
+            onAttemptFinish={finalizeAttemptSession}
             onClose={() => {
               setIsAddUrlOpen(false);
               setInitialUrl("");
               setInitialHeaders(undefined);
+              setInitialAttemptSessionId(undefined);
+              setInitialDownloadContext(undefined);
+              setAddUrlLaunchSource("manual");
             }}
             onAdd={handleAddDownload}
           />
@@ -1042,7 +1707,14 @@ function App() {
           
           <div className="flex items-center gap-3 relative z-10">
             <button 
-              onClick={() => setIsAddUrlOpen(true)}
+              onClick={() => {
+                setInitialUrl("");
+                setInitialHeaders(undefined);
+                setInitialAttemptSessionId(undefined);
+                setInitialDownloadContext(undefined);
+                setAddUrlLaunchSource("manual");
+                setIsAddUrlOpen(true);
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent/80 text-white rounded font-medium transition-colors whitespace-nowrap"
             >
               <Plus size={16} />
@@ -1131,8 +1803,10 @@ function App() {
                 segments={download.segments || []}
                 developerModeEnabled={developerModeEnabled}
                 onCopyDiagnostics={handleCopyDiagnostics}
+                onShowAttemptDetails={handleShowAttemptDetails}
                 onPause={handlePause}
                 onResume={handleResume}
+                onRefresh={handleRefreshDownload}
                 onDelete={handleDelete}
                 onOpenFolder={handleOpenFolder}
               />
@@ -1171,7 +1845,7 @@ function App() {
               </button>
             </div>
             {extensionStatusMessage && <div className="truncate text-gray-400">{extensionStatusMessage}</div>}
-            <div className="shrink-0">v0.1.0-beta.1</div>
+            <div className="shrink-0">v0.1.0-beta.2</div>
           </div>
         </div>
       </div>

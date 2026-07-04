@@ -87,7 +87,7 @@ function extensionRoutingDecision({
     payloadUrl;
 
   if (shouldPreferYouTubeMetadata({ payloadUrl, referrerUrl })) {
-    return "open_metadata";
+    return "confirm_start";
   }
 
   if (
@@ -96,14 +96,18 @@ function extensionRoutingDecision({
     isClearlyDirectMedia(effectiveUrl) &&
     !isManifestLikeUrl(effectiveUrl)
   ) {
-    return "auto_queue_direct";
+    return "auto_start";
   }
 
   if (source === "chromium-downloads-api") {
-    return "auto_queue_direct";
+    return "auto_start";
   }
 
-  return "open_metadata";
+  if (preferredManifestUrl) {
+    return "auto_start";
+  }
+
+  return "confirm_start";
 }
 
 const cases = [
@@ -114,25 +118,34 @@ const cases = [
       referrerUrl: "https://www.youtube.com/watch?v=abc123",
       source: "chromium-scan-overlay",
     }),
-    expected: "open_metadata",
+    expected: "confirm_start",
   },
   {
-    label: "generic direct mp4 scan capture should auto queue",
+    label: "generic direct mp4 scan capture should auto start",
     actual: extensionRoutingDecision({
       payloadUrl: "https://cdn.example.com/video.mp4",
       referrerUrl: "https://media.example.com/watch/alpha",
       source: "chromium-scan-overlay",
     }),
-    expected: "auto_queue_direct",
+    expected: "auto_start",
   },
   {
-    label: "manifest capture should prefer metadata flow",
+    label: "manifest capture should auto start",
     actual: extensionRoutingDecision({
       payloadUrl: "https://media.example.com/master.m3u8",
       referrerUrl: "https://media.example.com/watch/alpha",
       source: "chromium-scan-overlay",
     }),
-    expected: "open_metadata",
+    expected: "auto_start",
+  },
+  {
+    label: "plain page capture should remain confirm flow",
+    actual: extensionRoutingDecision({
+      payloadUrl: "https://media.example.com/watch/alpha",
+      referrerUrl: "https://media.example.com/watch/alpha",
+      source: "chromium-context-page",
+    }),
+    expected: "confirm_start",
   },
   {
     label: "browser download should wait for final direct url when only filename is strong",

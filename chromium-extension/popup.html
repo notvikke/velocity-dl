@@ -203,12 +203,15 @@
         </div>
         <div class="row">
           <div class="row-main">
-            <div class="label">Auto-open Quality Picker</div>
-            <div class="desc">Scan button opens in-app quality picker by default</div>
+            <div class="label">Scan Capture Mode</div>
+            <div class="desc">Choose quality selection or the currently playing stream</div>
           </div>
           <div>
-            <div class="row-state" id="scanPickerState">Off</div>
-            <button class="toggle" id="scanPickerToggle" type="button" aria-label="Auto-open quality picker"></button>
+            <div class="row-state" id="scanModeState">Picker</div>
+            <select class="mode-select" id="scanModePicker" type="button" aria-label="Scan capture mode" style="margin-top: 4px; min-width: 88px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-strong); color: var(--text); padding: 4px 8px;">
+              <option value="quality_picker">Quality</option>
+              <option value="current_stream">Stream</option>
+            </select>
           </div>
         </div>
       </div>

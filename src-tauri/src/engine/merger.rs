@@ -3,6 +3,15 @@ use std::path::PathBuf;
 use tokio::fs::{File, OpenOptions};
 use tokio::io;
 
+#[cfg(windows)]
+fn hide_console_window(command: &mut tokio::process::Command) {
+    use std::os::windows::process::CommandExt;
+    command.as_std_mut().creation_flags(0x08000000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut tokio::process::Command) {}
+
 pub async fn merge_segments(output_path: PathBuf, num_segments: u32) -> Result<()> {
     merge_segments_to_file(&output_path, &output_path, num_segments).await
 }
@@ -48,7 +57,9 @@ pub async fn merge_multi_track(
     audio_path: PathBuf,
     output_path: PathBuf,
 ) -> Result<()> {
-    let output = tokio::process::Command::new(ffmpeg_path)
+    let mut command = tokio::process::Command::new(ffmpeg_path);
+    hide_console_window(&mut command);
+    let output = command
         .arg("-i")
         .arg(&video_path)
         .arg("-i")

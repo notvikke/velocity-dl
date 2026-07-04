@@ -5,9 +5,10 @@ use crate::extractor::native_bridge::{
 };
 use crate::ipc::commands::{
     ack_external_capture_request, add_download, fetch_metadata, get_app_diagnostics,
+    delete_download_artifacts,
     get_browser_integration_status, get_extension_health, get_settings, get_tooling_status,
     install_browser_integration, open_browser_extensions_page, open_extension_setup_link, open_folder,
-    pause_download, save_settings, set_external_capture_listener_ready, start_sniffing,
+    pause_download, reveal_main_window, save_settings, set_external_capture_listener_ready, start_sniffing,
     update_tool_binary,
 };
 use std::io::{Read, Write};
@@ -20,10 +21,13 @@ use tauri::{
 };
 
 pub mod auth;
+pub mod delete_artifacts;
 pub mod engine;
 pub mod extractor;
 pub mod ipc;
+pub mod pathing;
 pub mod protocols;
+pub mod request_context;
 
 struct SingleInstanceGuard {
     _listener: TcpListener,
@@ -141,8 +145,10 @@ pub fn run() {
             get_browser_integration_status,
             get_tooling_status,
             get_app_diagnostics,
+            delete_download_artifacts,
             ack_external_capture_request,
             set_external_capture_listener_ready,
+            reveal_main_window,
             save_settings,
             fetch_metadata,
             install_browser_integration,

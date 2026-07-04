@@ -9,7 +9,6 @@ use crate::ipc::commands::DownloadItem;
 use crate::protocols::dash::{download_mpd, probe_duration_seconds as probe_dash_duration_seconds, DashProgress};
 use crate::protocols::hls::{download_m3u8, probe_duration_seconds, HlsProgress};
 use log::info;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,6 +17,11 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+async fn auth_cookie_header<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let auth_manager = app.try_state::<crate::auth::store::AuthManager>()?;
+    auth_manager.get_cookies_as_header().await
+}
 
 #[derive(Clone, Serialize)]
 struct DownloadProgress {
@@ -145,7 +149,9 @@ impl DownloadManager {
                     },
                 );
 
-                let config_dir = app.path().app_config_dir().unwrap_or_default();
+                let config_dir = crate::pathing::config_dir_for_app(&app)
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default();
                 let settings = AppSettings::load(config_dir).await;
                 if settings.play_sound_on_fail {
                     play_error_sound();
@@ -163,7 +169,9 @@ impl DownloadManager {
         cancel_token: CancellationToken,
         speed_limiter: GlobalSpeedLimiter,
     ) -> anyhow::Result<()> {
-        let config_dir = app.path().app_config_dir().unwrap_or_default();
+        let config_dir = crate::pathing::config_dir_for_app(&app)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
         let settings = AppSettings::load(config_dir).await;
         speed_limiter.set_limit_mb(settings.speed_limit_mb).await;
 
@@ -360,26 +368,10 @@ impl DownloadManager {
             &item.url[..item.url.len().min(80)]
         );
 
-        let mut video_headers = HeaderMap::new();
-        if let Some(h) = item.headers {
-            for (k, v) in h {
-                if let (Ok(name), Ok(value)) = (
-                    HeaderName::from_bytes(k.as_bytes()),
-                    HeaderValue::from_str(&v),
-                ) {
-                    video_headers.insert(name, value);
-                }
-            }
-        }
-
-        // Add cookies from AuthManager if available
-        if let Some(auth_manager) = app.try_state::<crate::auth::store::AuthManager>() {
-            if let Some(cookies) = auth_manager.get_cookies_as_header().await {
-                if let Ok(value) = HeaderValue::from_str(&cookies) {
-                    video_headers.insert(reqwest::header::COOKIE, value);
-                }
-            }
-        }
+        let auth_cookie = auth_cookie_header(&app).await;
+        let mut video_headers = crate::request_context::to_headermap(item.headers.as_ref());
+        crate::request_context::add_cookie_to_headermap(&mut video_headers, auth_cookie.as_deref());
+        crate::request_context::ensure_default_runtime_headers(&mut video_headers);
 
         if !is_multi_track {
             // SINGLE TRACK DOWNLOAD (Existing Logic)
@@ -527,28 +519,16 @@ impl DownloadManager {
             let total_video_size = item.total_size;
             let total_combined_size = total_video_size + total_audio_size;
 
-            let mut audio_headers = HeaderMap::new();
-            if let Some(h) = item.audio_headers {
-                for (k, v) in h {
-                    if let (Ok(name), Ok(value)) = (
-                        HeaderName::from_bytes(k.as_bytes()),
-                        HeaderValue::from_str(&v),
-                    ) {
-                        audio_headers.insert(name, value);
-                    }
-                }
+            let mut audio_headers = if let Some(audio_headers) = item.audio_headers.as_ref() {
+                crate::request_context::to_headermap(Some(audio_headers))
             } else {
+                crate::request_context::to_headermap(item.headers.as_ref())
+            };
+            if item.audio_headers.is_none() {
                 audio_headers = video_headers.clone();
             }
-
-            // Ensure audio_headers also has cookies if not already copied from video_headers
-            if let Some(auth_manager) = app.try_state::<crate::auth::store::AuthManager>() {
-                if let Some(cookies) = auth_manager.get_cookies_as_header().await {
-                    if let Ok(value) = HeaderValue::from_str(&cookies) {
-                        audio_headers.insert(reqwest::header::COOKIE, value);
-                    }
-                }
-            }
+            crate::request_context::add_cookie_to_headermap(&mut audio_headers, auth_cookie.as_deref());
+            crate::request_context::ensure_default_runtime_headers(&mut audio_headers);
 
             if total_video_size > 0 {
                 preallocate_file(&video_path, total_video_size).await?;
