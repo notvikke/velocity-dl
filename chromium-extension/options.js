@@ -1,25 +1,40 @@
+import {
+  DEFAULT_SCAN_CAPTURE_MODE,
+  getScanCaptureModeMeta,
+  normalizeScanCaptureMode,
+} from "./scan-capture-mode.js";
+
 const defaults = {
   takeoverAllDownloads: true,
   showContextMenu: true,
-  scanCaptureMode: "quality_picker",
+  scanCaptureMode: DEFAULT_SCAN_CAPTURE_MODE,
 };
 
 const settingsSummary = document.getElementById("settingsSummary");
 const status = document.getElementById("status");
+const scanModeSelect = document.getElementById("scanModeSelect");
+const scanModeDescription = document.getElementById("scanModeDescription");
+const scanModeStatus = document.getElementById("scanModeStatus");
 
-async function load() {
-  const data = await chrome.storage.local.get(defaults);
-  const scanCaptureMode =
-    data.scanCaptureMode === "current_stream" || data.scanCaptureMode === "quality_picker"
-      ? data.scanCaptureMode
-      : data.autoOpenQualityPickerOnScanCapture === false
-        ? "current_stream"
-        : "quality_picker";
+let currentSettings = { ...defaults };
+
+function renderScanMode(mode, legacySettings = {}) {
+  const scanModeMeta = getScanCaptureModeMeta(mode, legacySettings);
+  if (scanModeSelect) {
+    scanModeSelect.value = scanModeMeta.mode;
+  }
+  if (scanModeDescription) {
+    scanModeDescription.textContent = scanModeMeta.description;
+  }
+  return scanModeMeta;
+}
+
+function renderSettingsSummary(scanModeMeta) {
   settingsSummary.replaceChildren();
   [
-    ["Take over downloads", data.takeoverAllDownloads ? "On" : "Off"],
-    ["Context menus", data.showContextMenu ? "On" : "Off"],
-    ["Scan capture mode", scanCaptureMode === "quality_picker" ? "Quality picker" : "Current stream"],
+    ["Take over downloads", currentSettings.takeoverAllDownloads ? "On" : "Off"],
+    ["Context menus", currentSettings.showContextMenu ? "On" : "Off"],
+    ["Scan capture mode", scanModeMeta.label],
     ["Runtime ID", chrome.runtime.id],
   ].forEach(([label, value]) => {
     const row = document.createElement("div");
@@ -36,6 +51,17 @@ async function load() {
     row.appendChild(right);
     settingsSummary.appendChild(row);
   });
+}
+
+async function load() {
+  const data = await chrome.storage.local.get(defaults);
+  currentSettings = {
+    takeoverAllDownloads: !!data.takeoverAllDownloads,
+    showContextMenu: !!data.showContextMenu,
+    scanCaptureMode: normalizeScanCaptureMode(data.scanCaptureMode, data),
+  };
+  const scanModeMeta = renderScanMode(currentSettings.scanCaptureMode, data);
+  renderSettingsSummary(scanModeMeta);
   setStatus("Popup settings mirrored here for diagnostics.");
 }
 
@@ -45,5 +71,21 @@ function setStatus(text) {
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = setTimeout(() => (status.textContent = ""), 1500);
 }
+
+let scanModeStatusTimer = null;
+function setScanModeStatus(text) {
+  scanModeStatus.textContent = text;
+  if (scanModeStatusTimer) clearTimeout(scanModeStatusTimer);
+  scanModeStatusTimer = setTimeout(() => (scanModeStatus.textContent = ""), 1500);
+}
+
+scanModeSelect?.addEventListener("change", async () => {
+  const nextMode = normalizeScanCaptureMode(scanModeSelect.value);
+  currentSettings.scanCaptureMode = nextMode;
+  await chrome.storage.local.set({ scanCaptureMode: nextMode });
+  const scanModeMeta = renderScanMode(nextMode);
+  renderSettingsSummary(scanModeMeta);
+  setScanModeStatus("Advanced scan mode saved.");
+});
 
 load();

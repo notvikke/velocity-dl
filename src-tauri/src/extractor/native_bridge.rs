@@ -13,6 +13,8 @@ use tokio::time::{sleep, Duration};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NativeInboxEvent {
     pub action: String,
+    #[serde(default)]
+    pub transport_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub url: String,
     #[serde(default)]
@@ -47,6 +49,41 @@ pub struct NativeInboxEvent {
     pub original_url: Option<String>,
     #[serde(default)]
     pub browser_confidence: Option<String>,
+    #[serde(default)]
+    pub request_method: Option<String>,
+    #[serde(default)]
+    pub request_body: Option<NativeRequestBody>,
+    #[serde(default)]
+    pub request_body_unavailable: Option<bool>,
+    #[serde(default)]
+    pub network_request_id: Option<String>,
+    #[serde(default)]
+    pub tab_id: Option<i64>,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub initiator: Option<String>,
+    #[serde(default)]
+    pub document_url: Option<String>,
+    #[serde(default)]
+    pub redirect_chain: Vec<String>,
+    #[serde(default)]
+    pub context_captured_at_ms: Option<u64>,
+    #[serde(default)]
+    pub media_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NativeRequestBody {
+    pub encoding: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub byte_length: u64,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>

@@ -3,6 +3,16 @@ import { describe, expect, it } from "vitest";
 import { shouldOpenPickerForBrowserCapture } from "./browser-capture-routing";
 
 describe("shouldOpenPickerForBrowserCapture", () => {
+  it("does not force the picker for strong direct scan-overlay captures in smart mode", () => {
+    expect(
+      shouldOpenPickerForBrowserCapture({
+        source: "chromium-scan-overlay",
+        browserConfidence: "strong_direct",
+        scanCaptureMode: "smart",
+      })
+    ).toBe(false);
+  });
+
   it("opens the picker for strong direct scan-overlay captures when the scan setting requests it", () => {
     expect(
       shouldOpenPickerForBrowserCapture({

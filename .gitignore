@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+/target-devrun/
+/target-testfix/
+/release-artifacts/
 
 # Editor directories and files
 .vscode/*

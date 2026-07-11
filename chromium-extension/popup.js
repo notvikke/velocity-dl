@@ -1,9 +1,15 @@
+import {
+  DEFAULT_SCAN_CAPTURE_MODE,
+  getScanCaptureModeMeta,
+  normalizeScanCaptureMode,
+} from "./scan-capture-mode.js";
+
 const takeoverToggle = document.getElementById("takeoverToggle");
 const menuToggle = document.getElementById("menuToggle");
-const scanModePicker = document.getElementById("scanModePicker");
 const takeoverState = document.getElementById("takeoverState");
 const menuState = document.getElementById("menuState");
 const scanModeState = document.getElementById("scanModeState");
+const scanModeDesc = document.getElementById("scanModeDesc");
 const scanBtn = document.getElementById("scanBtn");
 const copyDebugBtn = document.getElementById("copyDebugBtn");
 const nativeState = document.getElementById("nativeState");
@@ -16,7 +22,7 @@ const debugDetails = document.getElementById("debugDetails");
 const state = {
   takeoverAllDownloads: true,
   showContextMenu: true,
-  scanCaptureMode: "quality_picker",
+  scanCaptureMode: DEFAULT_SCAN_CAPTURE_MODE,
   scanActive: false,
 };
 
@@ -30,13 +36,14 @@ function setToggle(btn, enabled, labelEl) {
 }
 
 function setScanMode(mode) {
-  state.scanCaptureMode = mode === "current_stream" ? "current_stream" : "quality_picker";
-  if (scanModePicker) {
-    scanModePicker.value = state.scanCaptureMode;
-  }
+  state.scanCaptureMode = normalizeScanCaptureMode(mode);
+  const scanModeMeta = getScanCaptureModeMeta(state.scanCaptureMode);
   if (scanModeState) {
-    scanModeState.textContent = state.scanCaptureMode === "quality_picker" ? "Picker" : "Stream";
-    scanModeState.style.color = state.scanCaptureMode === "quality_picker" ? "#20c47a" : "#8f9cb0";
+    scanModeState.textContent = scanModeMeta.badge;
+    scanModeState.style.color = state.scanCaptureMode === "smart" ? "#20c47a" : "#8f9cb0";
+  }
+  if (scanModeDesc) {
+    scanModeDesc.textContent = scanModeMeta.description;
   }
 }
 
@@ -100,7 +107,7 @@ async function buildDiagnosticsText() {
     `heartbeatMessage: ${stateResp?.heartbeat?.message || ""}`,
     `takeoverAllDownloads: ${!!state.takeoverAllDownloads}`,
     `showContextMenu: ${!!state.showContextMenu}`,
-    `scanCaptureMode: ${state.scanCaptureMode || "quality_picker"}`,
+    `scanCaptureMode: ${state.scanCaptureMode || DEFAULT_SCAN_CAPTURE_MODE}`,
     "",
     "lastHeartbeat:",
     debugResp?.heartbeat
@@ -155,10 +162,10 @@ async function loadState() {
   runtimeId.textContent = `ID: ${resp.runtimeId || "unknown"}`;
 
   if (resp.native?.ok) {
-    nativeState.textContent = "VelocityDL app detected";
+    nativeState.textContent = "Bridge ready";
     nativeState.className = "sub ok";
   } else {
-    nativeState.textContent = `VelocityDL app unavailable: ${resp.native?.message || "unknown error"}`;
+    nativeState.textContent = `Bridge unavailable: ${resp.native?.message || "unknown error"}`;
     nativeState.className = "sub warn";
   }
 
@@ -190,11 +197,6 @@ takeoverToggle.addEventListener("click", async () => {
 menuToggle.addEventListener("click", async () => {
   state.showContextMenu = !state.showContextMenu;
   setToggle(menuToggle, state.showContextMenu);
-  await saveState();
-});
-
-scanModePicker?.addEventListener("change", async () => {
-  setScanMode(scanModePicker.value);
   await saveState();
 });
 

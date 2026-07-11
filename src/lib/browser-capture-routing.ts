@@ -1,7 +1,7 @@
 export interface BrowserCaptureRoutingInput {
   source?: string;
   browserConfidence?: "strong_direct" | "strong_manifest" | "ambiguous_media" | "page";
-  scanCaptureMode?: "quality_picker" | "current_stream";
+  scanCaptureMode?: "smart" | "quality_picker" | "current_stream";
   scanAutoOpenQualityPicker?: boolean;
 }
 

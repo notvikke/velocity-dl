@@ -58,6 +58,9 @@ interface DownloadItem {
   browser_request_id?: string;
   original_url?: string;
   referrer?: string;
+  request_method?: string;
+  request_body?: CapturedRequestBody;
+  network_request_id?: string;
   quality_label?: string;
   bitrate_kbps?: number;
 }
@@ -152,7 +155,7 @@ interface ExternalDownloadRequest {
   referrer?: string;
   source?: string;
   scan_auto_open_quality_picker?: boolean;
-  scan_capture_mode?: "quality_picker" | "current_stream";
+  scan_capture_mode?: "smart" | "quality_picker" | "current_stream";
   capture_type?: "page_url" | "direct_media_url" | "blob_backed_media";
   raw_media_url?: string;
   headers?: Record<string, string>;
@@ -160,6 +163,20 @@ interface ExternalDownloadRequest {
   wait_for_ack?: boolean;
   original_url?: string;
   browser_confidence?: "strong_direct" | "strong_manifest" | "ambiguous_media" | "page";
+  request_method?: string;
+  request_body?: CapturedRequestBody;
+  request_body_unavailable?: boolean;
+  network_request_id?: string;
+  tab_id?: number;
+  frame_id?: number;
+}
+
+interface CapturedRequestBody {
+  encoding: "utf8" | "base64";
+  content_type?: string;
+  data?: string;
+  byte_length: number;
+  truncated?: boolean;
 }
 
 interface ExtensionHealth {
@@ -876,7 +893,7 @@ function App() {
           downloadOrigin: "browser_takeover",
           browserSource: payload.source,
           browserConfidence,
-          browserRequestId: requestId,
+          browserRequestId: payload.network_request_id || requestId,
           originalUrl: payload.original_url || payload.url,
           referrer: payload.referrer,
         };
@@ -943,7 +960,10 @@ function App() {
               ...baseContext,
               routeClass,
               strategyHint,
-            }
+            },
+            payload.request_method,
+            payload.request_body,
+            payload.network_request_id
           );
           if (!queued) {
             openMetadataModal(effectiveUrl, "confirm_start");
@@ -1065,7 +1085,7 @@ function App() {
       setExtensionHealth((prev) => {
         if (!prev) {
           return {
-            install_url: "https://github.com/notvikke/velocity-dl/tree/main/chromium-extension",
+            install_url: "https://chromewebstore.google.com/detail/velocitydl-bridge/alnagakehjhbfkdianlkmcncefldpmhm",
             setup_url: "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md",
             status: "connected",
             status_label: "Extension Connected",
@@ -1182,7 +1202,10 @@ function App() {
     audioHeaders?: Record<string, string>,
     attemptSessionId?: string,
     qualityMetadata?: DownloadQualityBadgeInput,
-    downloadContext?: BrowserDownloadContext
+    downloadContext?: BrowserDownloadContext,
+    requestMethod?: string,
+    requestBody?: CapturedRequestBody,
+    networkRequestId?: string
   ) => {
     const sessionId = attemptSessionId || beginAttemptSession(title || "Preparing download", url);
     try {
@@ -1203,6 +1226,9 @@ function App() {
         browserRequestId: downloadContext?.browserRequestId,
         originalUrl: downloadContext?.originalUrl,
         referrer: downloadContext?.referrer,
+        requestMethod,
+        requestBody,
+        networkRequestId,
       });
       newDownload.category = inferCategory(title || url);
       newDownload.segments = createIdleSegments(maxThreads);
@@ -1645,7 +1671,7 @@ function App() {
           <ExtensionSetupModal
             isOpen={isExtensionSetupOpen}
             initialChromeId={
-              extensionHealth?.last_seen_browser?.toLowerCase().includes("chrome")
+              extensionHealth?.last_seen_browser?.toLowerCase().includes("chrom")
                 ? extensionHealth.last_seen_runtime_id
                 : undefined
             }

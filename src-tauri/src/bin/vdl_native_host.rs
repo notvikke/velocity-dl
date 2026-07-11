@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeMessage {
     action: String,
+    #[serde(default)]
+    transport_id: Option<String>,
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -43,6 +46,45 @@ struct NativeMessage {
     original_url: Option<String>,
     #[serde(default)]
     browser_confidence: Option<String>,
+    #[serde(default)]
+    request_method: Option<String>,
+    #[serde(default)]
+    request_body: Option<NativeRequestBody>,
+    #[serde(default)]
+    request_body_unavailable: Option<bool>,
+    #[serde(default)]
+    network_request_id: Option<String>,
+    #[serde(default)]
+    tab_id: Option<i64>,
+    #[serde(default)]
+    frame_id: Option<i64>,
+    #[serde(default)]
+    initiator: Option<String>,
+    #[serde(default)]
+    document_url: Option<String>,
+    #[serde(default)]
+    redirect_chain: Vec<String>,
+    #[serde(default)]
+    context_captured_at_ms: Option<u64>,
+    #[serde(default)]
+    media_context: Option<serde_json::Value>,
+    #[serde(default)]
+    refresh_id: Option<String>,
+    #[serde(default)]
+    refresh_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NativeRequestBody {
+    encoding: String,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    byte_length: u64,
+    #[serde(default)]
+    truncated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,13 +148,55 @@ fn is_app_running(max_age: Duration) -> bool {
     now_ms.saturating_sub(last_seen_ms) <= max_age.as_millis() as u64
 }
 
-fn write_json_response(resp: &NativeResponse) -> Result<(), String> {
-    let bytes = serde_json::to_vec(resp).map_err(|e| e.to_string())?;
+thread_local! {
+    static CURRENT_TRANSPORT_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn serialize_json_response<T: Serialize>(resp: &T, transport_id: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut value = serde_json::to_value(resp).map_err(|e| e.to_string())?;
+    if let (Some(id), Some(object)) = (transport_id, value.as_object_mut()) {
+        object.insert("transport_id".to_string(), serde_json::Value::String(id.to_string()));
+    }
+    serde_json::to_vec(&value).map_err(|e| e.to_string())
+}
+
+fn write_json_response<T: Serialize>(resp: &T) -> Result<(), String> {
+    let bytes = CURRENT_TRANSPORT_ID.with(|id| serialize_json_response(resp, id.borrow().as_deref()))?;
     let len = (bytes.len() as u32).to_le_bytes();
     let mut stdout = io::stdout();
     stdout.write_all(&len).map_err(|e| e.to_string())?;
     stdout.write_all(&bytes).map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())
+}
+
+fn validate_capture_message(message: &NativeMessage) -> Result<(), String> {
+    if message
+        .url
+        .as_ref()
+        .map(|url| url.starts_with("http://") || url.starts_with("https://"))
+        != Some(true)
+    {
+        return Err("capture requires an http(s) url".to_string());
+    }
+    let method = message.request_method.as_deref().unwrap_or("GET").to_ascii_uppercase();
+    if method != "GET" && method != "POST" {
+        return Err(format!("unsupported capture request method '{method}'"));
+    }
+    if let Some(body) = &message.request_body {
+        if body.truncated || body.byte_length > 512 * 1024 {
+            return Err("capture request body is truncated or exceeds 512 KiB".to_string());
+        }
+        if body.encoding != "utf8" && body.encoding != "base64" {
+            return Err(format!("unsupported capture body encoding '{}'", body.encoding));
+        }
+        if body.data.is_none() {
+            return Err("capture request body data is missing".to_string());
+        }
+    }
+    if method == "POST" && message.request_body.is_none() && message.request_body_unavailable != Some(true) {
+        return Err("POST capture requires request body metadata".to_string());
+    }
+    Ok(())
 }
 
 fn load_settings_snapshot() -> AppSettingsSnapshot {
@@ -205,6 +289,7 @@ fn main() -> Result<(), String> {
             Some(m) => m,
             None => break,
         };
+        CURRENT_TRANSPORT_ID.with(|id| *id.borrow_mut() = message.transport_id.clone());
 
         if message.action == "ping" {
             let running = is_app_running(Duration::from_secs(12));
@@ -247,6 +332,32 @@ fn main() -> Result<(), String> {
             continue;
         }
 
+        if message.action == "get_session_refresh_requests" {
+            let config_dir = app_config_dir()?;
+            let requests = velocitydl_lib::browser_session::take_pending_refresh_requests(&config_dir)?;
+            write_json_response(&serde_json::json!({
+                "ok": true,
+                "message": "session refresh requests",
+                "refresh_requests": requests,
+            }))?;
+            continue;
+        }
+
+        if message.action == "session_refresh_response" {
+            let refresh_id = message.refresh_id.clone().ok_or_else(|| "session_refresh_response requires refresh_id".to_string())?;
+            let headers = message.refresh_headers.clone().ok_or_else(|| "session_refresh_response requires refresh_headers".to_string())?;
+            velocitydl_lib::browser_session::write_refresh_response(
+                &app_config_dir()?,
+                &velocitydl_lib::browser_session::SessionRefreshResponse {
+                    refresh_id,
+                    headers,
+                    captured_at_ms: message.sent_at_ms.unwrap_or(0),
+                },
+            )?;
+            write_json_response(&serde_json::json!({ "ok": true, "message": "session refresh stored" }))?;
+            continue;
+        }
+
         if message.action == "capture" {
             if !is_app_running(Duration::from_secs(12)) {
                 write_json_response(&NativeResponse {
@@ -259,15 +370,10 @@ fn main() -> Result<(), String> {
                 })?;
                 continue;
             }
-            if message
-                .url
-                .as_ref()
-                .map(|u| u.starts_with("http://") || u.starts_with("https://"))
-                != Some(true)
-            {
+            if let Err(validation_error) = validate_capture_message(&message) {
                 write_json_response(&NativeResponse {
                     ok: false,
-                    message: "capture requires an http(s) url".to_string(),
+                    message: validation_error,
                     accept_browser_download_requests: None,
                     browser_takeover_all_downloads: None,
                     accepted: Some(false),
@@ -350,4 +456,74 @@ fn main() -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{serialize_json_response, validate_capture_message, NativeMessage};
+
+    #[test]
+    fn capture_contract_deserializes_post_body_and_network_context() {
+        let message: NativeMessage = serde_json::from_value(serde_json::json!({
+            "action": "capture",
+            "transport_id": "transport-1",
+            "url": "https://example.test/export",
+            "request_method": "POST",
+            "request_body": {
+                "encoding": "utf8",
+                "content_type": "application/x-www-form-urlencoded",
+                "data": "format=csv",
+                "byte_length": 10,
+                "truncated": false
+            },
+            "network_request_id": "network-7",
+            "tab_id": 4,
+            "frame_id": 2,
+            "redirect_chain": ["https://example.test/start"]
+        })).unwrap();
+
+        assert_eq!(message.transport_id.as_deref(), Some("transport-1"));
+        assert_eq!(message.request_method.as_deref(), Some("POST"));
+        assert_eq!(message.request_body.as_ref().and_then(|body| body.data.as_deref()), Some("format=csv"));
+        assert_eq!(message.network_request_id.as_deref(), Some("network-7"));
+        assert_eq!(message.tab_id, Some(4));
+        assert_eq!(message.frame_id, Some(2));
+        assert_eq!(message.redirect_chain.len(), 1);
+        validate_capture_message(&message).unwrap();
+    }
+
+    #[test]
+    fn capture_contract_rejects_truncated_or_oversized_bodies() {
+        let mut message: NativeMessage = serde_json::from_value(serde_json::json!({
+            "action": "capture",
+            "url": "https://example.test/export",
+            "request_method": "POST",
+            "request_body": {
+                "encoding": "utf8",
+                "data": "x",
+                "byte_length": 600000,
+                "truncated": true
+            }
+        })).unwrap();
+        assert!(validate_capture_message(&message).unwrap_err().contains("body"));
+        message.request_body.as_mut().unwrap().truncated = false;
+        assert!(validate_capture_message(&message).unwrap_err().contains("body"));
+    }
+
+    #[test]
+    fn native_response_echoes_transport_id() {
+        let value = serialize_json_response(
+            &super::NativeResponse {
+                ok: true,
+                message: "ok".to_string(),
+                accept_browser_download_requests: None,
+                browser_takeover_all_downloads: None,
+                accepted: None,
+                route_class: None,
+            },
+            Some("transport-9"),
+        ).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert_eq!(parsed["transport_id"], "transport-9");
+    }
 }

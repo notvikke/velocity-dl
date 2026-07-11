@@ -2,6 +2,7 @@
 set "CARGO_BIN=C:\Users\vikas\.cargo\bin"
 set "RUSTUP_BIN=C:\Users\vikas\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin"
 set "PATH=%CARGO_BIN%;%RUSTUP_BIN%;%PATH%;%AppData%\npm"
+set "CARGO_TARGET_DIR=%~dp0target-devrun"
 
 echo [1/3] Checking Rust environment...
 "%CARGO_BIN%\cargo.exe" --version

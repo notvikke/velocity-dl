@@ -25,7 +25,7 @@ Installer choices:
 - Full installer: larger download, bundles offline dependencies for lower first-run failure rate.
 
 Known limitations:
-- Browser extension still requires one-time setup and extension ID registration.
+- Browser extension still requires a one-time local native-bridge install, even though the production extension now ships via the Chrome Web Store.
 - DRM-protected or otherwise unsupported streams are not supported.
 ```
 

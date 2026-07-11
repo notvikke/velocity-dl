@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "VelocityDL Bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwttQltdjNAldPTSnyy3vpwo+wFjYcl1nOcAixhjDP1JvwPAccKRn1B/CXbz4iDe28k6SHJucfmElFVIGJL5nsqQRWNEpa6JLnUZzEB7IglVQVtcmw6dReWG0ZBtw4P0ky7bAPvKqkafPkqbfKmbyFXWkzA64JKXWs11JmcaJyz39jez9teUK+bgmyfo9W85YSJmfUA8dXEeJSi2a9lEZ9dXw/cJs9BwwkSoUFhsTzgAk78H/93ONJTbmBP8LPS75DyzZD4O1RA1NNb7lSn2T01pUbQIdfudOafutM2DyIm5U92wkYGmgWKetVO+PcgZeJ7zJxQYhgdhEhxAL2zfjLwIDAQAB",
   "description": "Send browser downloads to VelocityDL via native messaging.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -12,6 +13,7 @@
   "permissions": [
     "alarms",
     "downloads",
+    "cookies",
     "storage",
     "nativeMessaging",
     "contextMenus",
@@ -29,6 +31,22 @@
     "type": "module"
   },
   "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["media-observer-main.js"],
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["media-observer.js"],
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
     {
       "matches": ["<all_urls>"],
       "js": ["scan-overlay.js"],

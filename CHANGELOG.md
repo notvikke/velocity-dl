@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.0-beta.3 - 2026-07-11
+
+Browser capture and extension reliability release.
+
+- Improved browser-originated capture routing for direct files, manifests, and ambiguous page captures.
+- Added stronger browser session propagation and native-bridge transport reliability across retries and resumes.
+- Refined scan overlay, quality selection, extension diagnostics, and release packaging behavior.
+- Updated the Chrome Web Store extension package to version 0.1.1.
+
 ## 0.1.0-beta.2 - 2026-07-04
 
 Browser takeover reliability and release-packaging hardening update.

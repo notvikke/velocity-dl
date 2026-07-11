@@ -203,15 +203,11 @@
         </div>
         <div class="row">
           <div class="row-main">
-            <div class="label">Scan Capture Mode</div>
-            <div class="desc">Choose quality selection or the currently playing stream</div>
+            <div class="label">Scan Capture</div>
+            <div class="desc" id="scanModeDesc">Auto-pick a direct file or the best available quality without extra prompts.</div>
           </div>
           <div>
-            <div class="row-state" id="scanModeState">Picker</div>
-            <select class="mode-select" id="scanModePicker" type="button" aria-label="Scan capture mode" style="margin-top: 4px; min-width: 88px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-strong); color: var(--text); padding: 4px 8px;">
-              <option value="quality_picker">Quality</option>
-              <option value="current_stream">Stream</option>
-            </select>
+            <div class="row-state" id="scanModeState">Smart</div>
           </div>
         </div>
       </div>
@@ -234,7 +230,7 @@
       </details>
 
       <div class="foot">
-        <a class="link" href="#" id="openOptions">Advanced options</a>
+        <a class="link" href="#" id="openOptions">Advanced scan options</a>
       </div>
     </div>
     <script src="popup.js" type="module"></script>

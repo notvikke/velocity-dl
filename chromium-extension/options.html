@@ -88,9 +88,26 @@
     <main>
       <h1>VelocityDL Bridge</h1>
       <p class="lead">
-        Popup controls are now the single place for download takeover, context menus, and scan mode.
-        This page keeps only troubleshooting details so those settings are not duplicated.
+        The popup keeps the common download takeover switches simple.
+        This page holds diagnostics and advanced scan behavior for the rare cases where you want to override the smart default.
       </p>
+
+      <section class="panel">
+        <h2>Advanced Scan Capture</h2>
+        <p>
+          <strong>Smart</strong> is recommended. It automatically chooses a direct file when one exists, or hands off the best available quality when the page only exposes a manifest.
+        </p>
+        <div class="kv">
+          <label class="label" for="scanModeSelect">Scan capture mode</label>
+          <select id="scanModeSelect" style="border-radius: 10px; border: 1px solid var(--line); background: #0f1520; color: var(--text); padding: 10px 12px; font-size: 13px;">
+            <option value="smart">Smart (recommended)</option>
+            <option value="quality_picker">Always prefer quality picker</option>
+            <option value="current_stream">Always prefer current stream</option>
+          </select>
+          <p id="scanModeDescription" style="margin: 0;"></p>
+        </div>
+        <div class="status" id="scanModeStatus"></div>
+      </section>
 
       <section class="panel">
         <h2>Current Settings Summary</h2>
@@ -103,7 +120,7 @@
         <ul>
           <li>If scan overlay was enabled on an already-open page, VelocityDL now retries script injection without requiring a full page reload.</li>
           <li>Keep the native host name at <code>com.velocitydl.native_host</code>.</li>
-          <li>If multiple unpacked VelocityDL copies are loaded in Chrome, disable the unused ones.</li>
+          <li>If multiple VelocityDL Bridge copies are enabled, keep only the Chrome Web Store install active unless you are intentionally testing an unpacked dev build.</li>
         </ul>
       </section>
     </main>

@@ -1,10 +1,14 @@
 param(
   [Parameter(Mandatory = $true)] [string] $HostExePath,
-  [Parameter(Mandatory = $true)] [string] $ChromeExtensionId,
+  [string] $ChromeExtensionId = "alnagakehjhbfkdianlkmcncefldpmhm",
   [string] $EdgeExtensionId
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
+  $EdgeExtensionId = $ChromeExtensionId
+}
 
 if (!(Test-Path $HostExePath)) {
   throw "Host exe not found: $HostExePath"
@@ -24,7 +28,8 @@ function Write-ManifestFile {
   $raw = Get-Content -Path $TemplatePath -Raw
   $raw = $raw.Replace("__HOST_EXE_PATH__", ($HostExePath.Replace("\", "\\")))
   $raw = $raw.Replace($ExtensionIdPlaceholder, $ExtensionIdValue)
-  Set-Content -Path $OutPath -Value $raw -Encoding UTF8
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($OutPath, $raw, $utf8NoBom)
 }
 
 $chromeOut = Join-Path $outDir "com.velocitydl.native_host.chrome.json"
@@ -35,9 +40,20 @@ Write-ManifestFile `
   -ExtensionIdValue $ChromeExtensionId
 
 New-Item -Path "HKCU:\Software\Google\Chrome\NativeMessagingHosts" -Force | Out-Null
-$chromeHostKey = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host"
-New-Item -Path $chromeHostKey -Force | Out-Null
-Set-Item -Path $chromeHostKey -Value $chromeOut
+$chromeHostKey = "HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host"
+& reg.exe add $chromeHostKey /ve /t REG_SZ /d $chromeOut /f | Out-Null
+
+New-Item -Path "HKCU:\Software\Chromium\NativeMessagingHosts" -Force | Out-Null
+$chromiumRootKey = "HKCU\Software\Chromium\NativeMessagingHosts"
+$chromiumHostKey = "HKCU\Software\Chromium\NativeMessagingHosts\com.velocitydl.native_host"
+& reg.exe add $chromiumRootKey /v com.velocitydl.native_host /t REG_SZ /d $chromeOut /f | Out-Null
+& reg.exe add $chromiumHostKey /ve /t REG_SZ /d $chromeOut /f | Out-Null
+
+New-Item -Path "HKCU:\Software\imput\Helium\NativeMessagingHosts" -Force | Out-Null
+$heliumRootKey = "HKCU\Software\imput\Helium\NativeMessagingHosts"
+$heliumHostKey = "HKCU\Software\imput\Helium\NativeMessagingHosts\com.velocitydl.native_host"
+& reg.exe add $heliumRootKey /v com.velocitydl.native_host /t REG_SZ /d $chromeOut /f | Out-Null
+& reg.exe add $heliumHostKey /ve /t REG_SZ /d $chromeOut /f | Out-Null
 
 if ($EdgeExtensionId) {
   $edgeOut = Join-Path $outDir "com.velocitydl.native_host.edge.json"
@@ -48,13 +64,14 @@ if ($EdgeExtensionId) {
     -ExtensionIdValue $EdgeExtensionId
 
   New-Item -Path "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts" -Force | Out-Null
-  $edgeHostKey = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host"
-  New-Item -Path $edgeHostKey -Force | Out-Null
-  Set-Item -Path $edgeHostKey -Value $edgeOut
+  $edgeHostKey = "HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host"
+  & reg.exe add $edgeHostKey /ve /t REG_SZ /d $edgeOut /f | Out-Null
 }
 
 Write-Output "Installed native host manifests:"
 Write-Output "Chrome: $chromeOut"
+Write-Output "Chromium: $chromeOut"
+Write-Output "Helium: $chromeOut"
 if ($EdgeExtensionId) {
   Write-Output "Edge:   $edgeOut"
 }

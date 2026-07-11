@@ -1,14 +1,25 @@
 import { shouldRejectWeakScanCapture } from "./capture-routing.js";
+import { chooseResolvedScanCapture } from "./scan-capture-choice.js";
+import { DEFAULT_SCAN_CAPTURE_MODE, normalizeScanCaptureMode } from "./scan-capture-mode.js";
 import { shouldReinjectScanOverlay } from "./scan-overlay-state.js";
+import { buildBrowserTakeoverHeaders } from "./takeover-session.js";
+import {
+  RequestContextStore,
+  mergeSessionCookies,
+  sanitizeRequestHeaders,
+} from "./request-context.js";
+import { MediaCandidateStore } from "./media-observer-core.js";
+import { NativeTransport } from "./native-transport.js";
 
 const NATIVE_HOST = "com.velocitydl.native_host";
 const HEARTBEAT_ALARM = "vdlExtensionHeartbeat";
+const SESSION_REFRESH_ALARM = "vdlSessionRefresh";
 const HEARTBEAT_PERIOD_MINUTES = 5;
 
 const DEFAULT_SETTINGS = {
   takeoverAllDownloads: true,
   showContextMenu: true,
-  scanCaptureMode: "quality_picker",
+  scanCaptureMode: DEFAULT_SCAN_CAPTURE_MODE,
 };
 let menuRebuildQueue = Promise.resolve();
 const WEBREQUEST_CAPTURE_DEDUPE_WINDOW_MS = 90_000;
@@ -19,6 +30,13 @@ const ACTIVE_SCAN_TABS_KEY = "activeScanTabs";
 const LAST_SCAN_DEBUG_KEY = "lastScanDebug";
 const LAST_HEARTBEAT_DEBUG_KEY = "lastHeartbeatDebug";
 const pendingBrowserDownloads = new Map();
+const requestContextStore = new RequestContextStore();
+const observedMediaStore = new MediaCandidateStore();
+const nativeTransport = new NativeTransport({
+  connect: () => chrome.runtime.connectNative(NATIVE_HOST),
+  maxInFlight: 8,
+  timeoutMs: 90_000,
+});
 const DOWNLOADABLE_FILE_EXT_RE =
   /\.(exe|msi|msix|msixbundle|appx|appxbundle|zip|rar|7z|tar|gz|bz2|xz|iso|img|dmg|pkg|deb|rpm|apk|ipa|jar|pdf|doc|docx|xls|xlsx|ppt|pptx|csv|json|xml|txt|rtf|epub)(?:$|[?#])/i;
 
@@ -138,12 +156,7 @@ async function getSettings() {
   return {
     ...DEFAULT_SETTINGS,
     ...data,
-    scanCaptureMode:
-      data.scanCaptureMode === "current_stream" || data.scanCaptureMode === "quality_picker"
-        ? data.scanCaptureMode
-        : data.autoOpenQualityPickerOnScanCapture === false
-          ? "current_stream"
-          : "quality_picker",
+    scanCaptureMode: normalizeScanCaptureMode(data.scanCaptureMode, data),
   };
 }
 
@@ -219,6 +232,7 @@ function shouldHandleUrl(url) {
   if (!url || typeof url !== "string") return false;
   if (!/^https?:\/\//i.test(url)) return false;
   if (url.startsWith("https://chrome.google.com/webstore")) return false;
+  if (url.startsWith("https://chromewebstore.google.com/")) return false;
   return true;
 }
 
@@ -548,13 +562,13 @@ function normalizeCapturePayload(payload) {
 
 async function sendCapture(payload) {
   try {
-    const normalizedPayload = normalizeCapturePayload(payload);
+    const normalizedPayload = normalizeCapturePayload(await enrichCaptureRequestContext(payload));
     const requestId =
       normalizedPayload.request_id ||
       `capture-${normalizedPayload.source || "unknown"}-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 8)}`;
-    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+    const response = await nativeTransport.request({
       action: "capture",
       capture_type: normalizedPayload.capture_type,
       request_id: requestId,
@@ -572,6 +586,40 @@ async function sendCapture(payload) {
   }
 }
 
+async function enrichCaptureRequestContext(payload) {
+  const url = payload?.url || payload?.raw_media_url || payload?.original_url || "";
+  const tabId = Number.isInteger(payload?.tab_id) ? payload.tab_id : -1;
+  const captured = requestContextStore.findBest(url, tabId);
+  const combinedHeaders = sanitizeRequestHeaders({
+    ...(captured?.headers || {}),
+    ...(payload?.headers || {}),
+  });
+  let cookies = [];
+  if (shouldHandleUrl(url) && typeof chrome.cookies?.getAll === "function") {
+    try {
+      cookies = await chrome.cookies.getAll({ url });
+    } catch (error) {
+      console.warn("[VelocityDL] Failed to refresh URL-scoped cookies:", error);
+    }
+  }
+  const headers = mergeSessionCookies(combinedHeaders, cookies);
+  const requestBody = captured?.request_body || payload?.request_body || null;
+  return {
+    ...payload,
+    headers: Object.keys(headers).length ? headers : null,
+    request_method: captured?.request_method || payload?.request_method || "GET",
+    request_body: requestBody?.encoding === "unavailable" ? null : requestBody,
+    request_body_unavailable: requestBody?.encoding === "unavailable",
+    network_request_id: captured?.request_id || payload?.network_request_id || null,
+    tab_id: captured?.tab_id ?? (tabId >= 0 ? tabId : null),
+    frame_id: captured?.frame_id ?? payload?.frame_id ?? null,
+    initiator: captured?.initiator || payload?.initiator || null,
+    document_url: captured?.document_url || payload?.document_url || null,
+    redirect_chain: captured?.redirect_chain || payload?.redirect_chain || [],
+    context_captured_at_ms: captured?.context_captured_at_ms || Date.now(),
+  };
+}
+
 async function setLastHeartbeatDebug(debugInfo) {
   await chrome.storage.session.set({ [LAST_HEARTBEAT_DEBUG_KEY]: debugInfo });
 }
@@ -579,7 +627,7 @@ async function setLastHeartbeatDebug(debugInfo) {
 async function pingNativeHost() {
   try {
     console.log("[VelocityDL] pingNativeHost -> sending");
-    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+    const response = await nativeTransport.request({
       action: "ping",
     });
     console.log("[VelocityDL] pingNativeHost <- response", response);
@@ -595,7 +643,7 @@ async function pingNativeHost() {
 
 async function fetchHostPreferences() {
   try {
-    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+    const response = await nativeTransport.request({
       action: "get_preferences",
     });
     if (response?.ok !== true) return null;
@@ -632,7 +680,7 @@ async function sendHeartbeat(reason = "background") {
       runtimeId: chrome.runtime.id,
       version: chrome.runtime.getManifest().version || "unknown",
     });
-    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+    const response = await nativeTransport.request({
       action: "heartbeat",
       browser: "chromium",
       extension_version: chrome.runtime.getManifest().version || "unknown",
@@ -677,6 +725,40 @@ async function scheduleHeartbeatAlarm() {
     delayInMinutes: 0.2,
     periodInMinutes: HEARTBEAT_PERIOD_MINUTES,
   });
+  try {
+    await chrome.alarms.clear(SESSION_REFRESH_ALARM);
+  } catch {}
+  chrome.alarms.create(SESSION_REFRESH_ALARM, {
+    delayInMinutes: 0.1,
+    periodInMinutes: 0.5,
+  });
+}
+
+async function syncSessionRefreshRequests() {
+  let response;
+  try {
+    response = await nativeTransport.request({ action: "get_session_refresh_requests" });
+  } catch {
+    return;
+  }
+  const requests = Array.isArray(response?.refresh_requests) ? response.refresh_requests : [];
+  await Promise.all(requests.slice(0, 32).map(async (request) => {
+    if (!request?.refresh_id || !shouldHandleUrl(request?.url)) return;
+    const captured = requestContextStore.findBest(request.url, -1);
+    let cookies = [];
+    try {
+      cookies = typeof chrome.cookies?.getAll === "function"
+        ? await chrome.cookies.getAll({ url: request.url })
+        : [];
+    } catch {}
+    const refreshHeaders = mergeSessionCookies(captured?.headers || {}, cookies);
+    await nativeTransport.request({
+      action: "session_refresh_response",
+      refresh_id: request.refresh_id,
+      refresh_headers: refreshHeaders,
+      sent_at_ms: Date.now(),
+    });
+  }));
 }
 
 async function toggleScanOnTab(tab) {
@@ -708,6 +790,7 @@ async function handleBrowserDownload(item) {
     originalUrl: item.url,
     filename: item.filename || null,
     mime: item.mime || null,
+    referrer: item.referrer || null,
   });
 
   setTimeout(() => {
@@ -739,14 +822,28 @@ async function flushPendingBrowserDownload(id) {
     return;
   }
 
+  let headers = null;
+  try {
+    const cookies = typeof chrome.cookies?.getAll === "function"
+      ? await chrome.cookies.getAll({ url: candidateUrl })
+      : [];
+    headers = buildBrowserTakeoverHeaders({
+      referrer: pending.referrer || null,
+      cookies,
+    });
+  } catch (error) {
+    console.warn("[VelocityDL] Failed to collect browser takeover session headers:", error);
+  }
+
   const requestId = `downloads-${id}-${Date.now()}`;
   const handoff = await sendCapture({
     url: candidateUrl,
     original_url: pending.originalUrl || candidateUrl,
     filename: pending.filename || null,
     mime: pending.mime || null,
+    referrer: pending.referrer || null,
     source: "chromium-downloads-api",
-    headers: null,
+    headers,
     request_id: requestId,
     wait_for_ack: true,
   });
@@ -772,6 +869,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   queueRebuildContextMenus(settings.showContextMenu);
   await scheduleHeartbeatAlarm();
   await sendHeartbeat("installed");
+  await syncSessionRefreshRequests();
 });
 chrome.runtime.onStartup.addListener(async () => {
   console.log("[VelocityDL] onStartup");
@@ -781,12 +879,19 @@ chrome.runtime.onStartup.addListener(async () => {
   queueRebuildContextMenus(settings.showContextMenu);
   await scheduleHeartbeatAlarm();
   await sendHeartbeat("startup");
+  await syncSessionRefreshRequests();
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm?.name !== HEARTBEAT_ALARM) return;
-  console.log("[VelocityDL] alarm fired", alarm.name);
-  await sendHeartbeat("alarm");
+  if (alarm?.name === HEARTBEAT_ALARM) {
+    console.log("[VelocityDL] alarm fired", alarm.name);
+    await sendHeartbeat("alarm");
+    await syncSessionRefreshRequests();
+    return;
+  }
+  if (alarm?.name === SESSION_REFRESH_ALARM) {
+    await syncSessionRefreshRequests();
+  }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -827,10 +932,33 @@ chrome.downloads.onChanged.addListener((delta) => {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
+    requestContextStore.onBeforeRequest(details);
     if (details?.tabId === -1) return;
     sendWebRequestCapture(details, "");
   },
-  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] }
+  { urls: ["<all_urls>"] },
+  ["requestBody"]
+);
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => requestContextStore.onBeforeSendHeaders(details),
+  { urls: ["<all_urls>"] },
+  ["requestHeaders", "extraHeaders"]
+);
+
+chrome.webRequest.onBeforeRedirect.addListener(
+  (details) => requestContextStore.onBeforeRedirect(details),
+  { urls: ["<all_urls>"] }
+);
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => requestContextStore.onCompleted(details),
+  { urls: ["<all_urls>"] }
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => requestContextStore.onCompleted(details),
+  { urls: ["<all_urls>"] }
 );
 
 chrome.webRequest.onHeadersReceived.addListener(
@@ -851,6 +979,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       original_url: info.linkUrl,
       referrer: info.pageUrl || null,
       source: "chromium-context-link",
+      tab_id: tab?.id ?? null,
       headers: info.pageUrl ? { Referer: info.pageUrl } : null,
     });
     return;
@@ -861,6 +990,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       url: tab.url,
       original_url: tab.url,
       source: "chromium-context-page",
+      tab_id: tab?.id ?? null,
       headers: tab.url ? { Referer: tab.url } : null,
     });
     return;
@@ -872,6 +1002,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       original_url: info.srcUrl,
       referrer: info.pageUrl || null,
       source: "chromium-context-media",
+      tab_id: tab?.id ?? null,
       headers: info.pageUrl ? { Referer: info.pageUrl } : null,
     });
   }
@@ -889,6 +1020,27 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "vdl_media_observed") {
+    const tabId = sender?.tab?.id;
+    const frameId = sender?.frameId ?? 0;
+    const event = message.event || {};
+    const snapshot = observedMediaStore.observe({ ...event, tabId, frameId });
+    if (snapshot?.preferred_url && snapshot.preferred_url === event.url) {
+      rememberPlayableForTab(
+        {
+          tabId,
+          frameId,
+          initiator: sender?.origin || safeOrigin(sender?.tab?.url || ""),
+          documentUrl: sender?.url || sender?.tab?.url || "",
+        },
+        event.url,
+        event.mime || ""
+      );
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message?.type === "vdl_popup_get_state") {
     (async () => {
       console.log("[VelocityDL] popup requested state");
@@ -927,8 +1079,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const next = {
         takeoverAllDownloads: !!message.takeoverAllDownloads,
         showContextMenu: !!message.showContextMenu,
-        scanCaptureMode:
-          message.scanCaptureMode === "current_stream" ? "current_stream" : "quality_picker",
+        scanCaptureMode: normalizeScanCaptureMode(message.scanCaptureMode),
       };
       await chrome.storage.local.set(next);
       queueRebuildContextMenus(next.showContextMenu);
@@ -961,34 +1112,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   (async () => {
     try {
+      const scanSettings = await getSettings();
       const senderTabId = sender?.tab?.id;
       const referrer = message.referrer || sender?.tab?.url || null;
       const rawMediaUrl = message.rawMediaUrl || null;
       let resolvedUrl = message.url;
       let resolvedRawMediaUrl = rawMediaUrl;
+      const observedMedia = observedMediaStore.snapshot(senderTabId, sender?.frameId ?? null);
       const rankedCandidates = rankedPlayableEntriesForTab(senderTabId, referrer).slice(0, 5);
+      if (
+        observedMedia?.preferred_url &&
+        !rankedCandidates.some((candidate) => candidate.url === observedMedia.preferred_url)
+      ) {
+        rankedCandidates.unshift({
+          url: observedMedia.preferred_url,
+          score: 260,
+          initiator: safeOrigin(referrer || ""),
+          documentUrl: referrer || "",
+          mime: "",
+        });
+      }
 
       const directRawMediaUrl =
         typeof rawMediaUrl === "string" && isConcretePlayableUrl(rawMediaUrl) ? rawMediaUrl : null;
-      if (directRawMediaUrl) {
-        resolvedUrl = directRawMediaUrl;
-      } else {
-        const canUseRecentPlayable =
-          message?.source === "chromium-scan-overlay" &&
-          (
-            typeof resolvedUrl !== "string" ||
-            !/^https?:\/\//i.test(resolvedUrl) ||
-            resolvedUrl === referrer ||
-            !isConcretePlayableUrl(resolvedUrl)
-          );
-        if (canUseRecentPlayable) {
-          const recentPlayable = rankedCandidates[0]?.url || null;
-          if (recentPlayable) {
-            resolvedUrl = recentPlayable;
-            resolvedRawMediaUrl = recentPlayable;
-          }
-        }
-      }
+      const scanCaptureSelection = chooseResolvedScanCapture({
+        source: message?.source,
+        scanCaptureMode: scanSettings.scanCaptureMode,
+        messageUrl: resolvedUrl,
+        referrer,
+        directRawMediaUrl,
+        rankedCandidates,
+      });
+      resolvedUrl = scanCaptureSelection.resolvedUrl;
+      resolvedRawMediaUrl = scanCaptureSelection.resolvedRawMediaUrl;
 
       await setLastScanDebug({
         at: Date.now(),
@@ -998,10 +1154,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         inputRawMediaUrl: rawMediaUrl || null,
         resolvedUrl,
         resolvedRawMediaUrl: resolvedRawMediaUrl || null,
-        usedRecentPlayable:
-          resolvedUrl !== message.url &&
-          typeof resolvedUrl === "string" &&
-          resolvedUrl === rankedCandidates[0]?.url,
+        usedRecentPlayable: scanCaptureSelection.usedRecentPlayable,
         topCandidates: rankedCandidates.map((entry) => ({
           url: entry.url,
           score: entry.score,
@@ -1032,10 +1185,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           inputRawMediaUrl: rawMediaUrl || null,
           resolvedUrl,
           resolvedRawMediaUrl: resolvedRawMediaUrl || null,
-          usedRecentPlayable:
-            resolvedUrl !== message.url &&
-            typeof resolvedUrl === "string" &&
-            resolvedUrl === rankedCandidates[0]?.url,
+          usedRecentPlayable: scanCaptureSelection.usedRecentPlayable,
           rejectionReason: weakScanCaptureDecision.reason,
           topCandidates: rankedCandidates.map((entry) => ({
             url: entry.url,
@@ -1060,7 +1210,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      const scanSettings = await getSettings();
+      let headers = null;
+      try {
+        const cookies = typeof chrome.cookies?.getAll === "function"
+          ? await chrome.cookies.getAll({ url: resolvedUrl })
+          : [];
+        headers = buildBrowserTakeoverHeaders({
+          referrer,
+          cookies,
+        });
+      } catch (error) {
+        console.warn("[VelocityDL] Failed to collect scan capture session headers:", error);
+      }
+
       const payload = {
         url: resolvedUrl,
         original_url: message.url || resolvedUrl,
@@ -1069,18 +1231,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         raw_media_url: resolvedRawMediaUrl,
         referrer,
         source: "chromium-scan-overlay",
+        tab_id: senderTabId ?? null,
+        frame_id: sender?.frameId ?? null,
+        media_context: observedMedia,
         scan_auto_open_quality_picker: scanSettings.scanCaptureMode === "quality_picker",
         scan_capture_mode: scanSettings.scanCaptureMode,
-        headers: referrer
+        headers: headers || resolvedRawMediaUrl
           ? {
-              Referer: referrer,
+              ...(headers || {}),
               ...(resolvedRawMediaUrl
                 ? { "X-VDL-Raw-Media-Url": String(resolvedRawMediaUrl) }
                 : {}),
             }
-          : (resolvedRawMediaUrl
-              ? { "X-VDL-Raw-Media-Url": String(resolvedRawMediaUrl) }
-              : null),
+          : null,
       };
 
       await sendCapture({

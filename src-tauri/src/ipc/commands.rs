@@ -4,7 +4,7 @@ use crate::extractor::{
     binaries,
     native_bridge::{
         mark_external_capture_listener_ready, write_capture_ack, CaptureAckPayload,
-        ExtensionHealthState,
+        ExtensionHealthState, NativeRequestBody,
     },
     webview, ytdlp,
 };
@@ -39,6 +39,9 @@ pub struct DownloadItem {
     pub browser_request_id: Option<String>,
     pub original_url: Option<String>,
     pub referrer: Option<String>,
+    pub request_method: Option<String>,
+    pub request_body: Option<NativeRequestBody>,
+    pub network_request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -57,20 +60,37 @@ pub struct ExtensionHealthResponse {
 pub struct BrowserIntegrationStatus {
     pub extension_directory: Option<String>,
     pub native_host_path: Option<String>,
+    pub webstore_extension_id: String,
+    pub webstore_install_url: String,
     pub chrome_available: bool,
+    pub helium_available: bool,
     pub edge_available: bool,
     pub chrome_manifest_installed: bool,
+    pub chromium_manifest_installed: bool,
+    pub helium_manifest_installed: bool,
     pub edge_manifest_installed: bool,
     pub chrome_manifest_path: Option<String>,
+    pub chromium_manifest_path: Option<String>,
+    pub helium_manifest_path: Option<String>,
     pub edge_manifest_path: Option<String>,
+    pub chrome_registered_manifest_path: Option<String>,
+    pub chromium_registered_manifest_path: Option<String>,
+    pub helium_registered_manifest_path: Option<String>,
+    pub edge_registered_manifest_path: Option<String>,
     pub chrome_manifest_extension_id: Option<String>,
+    pub chromium_manifest_extension_id: Option<String>,
+    pub helium_manifest_extension_id: Option<String>,
     pub edge_manifest_extension_id: Option<String>,
     pub last_seen_runtime_id: Option<String>,
     pub last_seen_browser: Option<String>,
     pub last_heartbeat_at_ms: Option<u64>,
     pub chrome_runtime_matches_manifest: bool,
+    pub chromium_runtime_matches_manifest: bool,
+    pub helium_runtime_matches_manifest: bool,
     pub edge_runtime_matches_manifest: bool,
     pub chrome_manifest_id_readable: bool,
+    pub chromium_manifest_id_readable: bool,
+    pub helium_manifest_id_readable: bool,
     pub edge_manifest_id_readable: bool,
     pub docs_url: String,
 }
@@ -111,6 +131,72 @@ enum AttemptStatus {
     Running,
     Succeeded,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserManifestKind {
+    ChromeLike,
+    Edge,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeBrowserTarget {
+    id: &'static str,
+    label: &'static str,
+    registry_key: &'static str,
+    root_value_registry_key: Option<&'static str>,
+    manifest_kind: BrowserManifestKind,
+    install_url: &'static str,
+    extensions_url: &'static str,
+}
+
+const CHROME_WEB_STORE_EXTENSION_ID: &str = "alnagakehjhbfkdianlkmcncefldpmhm";
+const CHROME_WEB_STORE_INSTALL_URL: &str =
+    "https://chromewebstore.google.com/detail/velocitydl-bridge/alnagakehjhbfkdianlkmcncefldpmhm";
+const FALLBACK_SETUP_URL: &str =
+    "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md";
+
+fn native_browser_targets() -> &'static [NativeBrowserTarget] {
+    const TARGETS: &[NativeBrowserTarget] = &[
+        NativeBrowserTarget {
+            id: "chromium",
+            label: "Chromium",
+            registry_key: r"HKCU\Software\Chromium\NativeMessagingHosts\com.velocitydl.native_host",
+            root_value_registry_key: Some(r"HKCU\Software\Chromium\NativeMessagingHosts"),
+            manifest_kind: BrowserManifestKind::ChromeLike,
+            install_url: CHROME_WEB_STORE_INSTALL_URL,
+            extensions_url: "chrome://extensions",
+        },
+        NativeBrowserTarget {
+            id: "chrome",
+            label: "Chrome",
+            registry_key: r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host",
+            root_value_registry_key: None,
+            manifest_kind: BrowserManifestKind::ChromeLike,
+            install_url: CHROME_WEB_STORE_INSTALL_URL,
+            extensions_url: "chrome://extensions",
+        },
+        NativeBrowserTarget {
+            id: "helium",
+            label: "Helium",
+            registry_key: r"HKCU\Software\imput\Helium\NativeMessagingHosts\com.velocitydl.native_host",
+            root_value_registry_key: Some(r"HKCU\Software\imput\Helium\NativeMessagingHosts"),
+            manifest_kind: BrowserManifestKind::ChromeLike,
+            install_url: CHROME_WEB_STORE_INSTALL_URL,
+            extensions_url: "chrome://extensions",
+        },
+        NativeBrowserTarget {
+            id: "edge",
+            label: "Edge",
+            registry_key: r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host",
+            root_value_registry_key: None,
+            manifest_kind: BrowserManifestKind::Edge,
+            install_url: CHROME_WEB_STORE_INSTALL_URL,
+            extensions_url: "edge://extensions",
+        },
+    ];
+
+    TARGETS
 }
 
 fn strategy_hint_to_media_strategy(hint: Option<&str>) -> Option<MediaStrategy> {
@@ -277,6 +363,11 @@ fn find_browser_executable(browser: &str) -> Option<PathBuf> {
                 .as_ref()
                 .map(|base| base.join("Microsoft\\Edge\\Application\\msedge.exe")),
         ],
+        "helium" => vec![
+            local_app_data
+                .as_ref()
+                .map(|base| base.join("imput\\Helium\\Application\\chrome.exe")),
+        ],
         _ => Vec::new(),
     };
 
@@ -307,6 +398,23 @@ fn extension_install_dir() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .ok_or_else(|| "LOCALAPPDATA is not available".to_string())?;
     Ok(local_app_data.join("VelocityDL").join("chromium-extension"))
+}
+
+fn push_native_host_target_candidates(candidates: &mut Vec<PathBuf>, target_dir: &Path) {
+    candidates.push(target_dir.join("release").join("vdl_native_host.exe"));
+    candidates.push(
+        target_dir
+            .join("release")
+            .join("native-host")
+            .join("vdl_native_host.exe"),
+    );
+    candidates.push(target_dir.join("debug").join("vdl_native_host.exe"));
+    candidates.push(
+        target_dir
+            .join("debug")
+            .join("native-host")
+            .join("vdl_native_host.exe"),
+    );
 }
 
 fn resolve_bundled_resource<R: Runtime>(app: &AppHandle<R>, relative_path: &str) -> Option<PathBuf> {
@@ -340,52 +448,6 @@ fn resolve_extension_directory<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf
         .find(|path| path.exists() && path.join("manifest.json").exists())
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
-    if !source.exists() {
-        return Err(format!("Source directory '{}' does not exist", source.display()));
-    }
-    std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
-    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|e| e.to_string())?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            if let Some(parent) = destination_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::copy(&source_path, &destination_path).map_err(|e| {
-                format!(
-                    "Failed to copy '{}' to '{}': {}",
-                    source_path.display(),
-                    destination_path.display(),
-                    e
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn stage_extension_directory<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let source = resolve_bundled_resource(app, "chromium-extension")
-        .or_else(|| {
-            let current = std::env::current_dir().ok()?;
-            let candidate = current.join("chromium-extension");
-            (candidate.exists() && candidate.join("manifest.json").exists()).then_some(candidate)
-        })
-        .ok_or_else(|| "VelocityDL Chromium extension files were not found in this build".to_string())?;
-
-    let destination = extension_install_dir()?;
-    if source != destination {
-        copy_dir_recursive(&source, &destination)?;
-    }
-    Ok(destination)
-}
-
 fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(install_dir) = native_host_install_dir() {
@@ -401,23 +463,13 @@ fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<Path
             candidates.push(parent.join("native-host").join("vdl_native_host.exe"));
         }
     }
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        push_native_host_target_candidates(&mut candidates, &target_dir);
+    }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("src-tauri").join("target").join("release").join("vdl_native_host.exe"));
-        candidates.push(
-            cwd.join("src-tauri")
-                .join("target")
-                .join("release")
-                .join("native-host")
-                .join("vdl_native_host.exe"),
-        );
-        candidates.push(cwd.join("src-tauri").join("target").join("debug").join("vdl_native_host.exe"));
-        candidates.push(
-            cwd.join("src-tauri")
-                .join("target")
-                .join("debug")
-                .join("native-host")
-                .join("vdl_native_host.exe"),
-        );
+        push_native_host_target_candidates(&mut candidates, &cwd.join("target-devrun"));
+        push_native_host_target_candidates(&mut candidates, &cwd.join("src-tauri").join("target-devrun"));
+        push_native_host_target_candidates(&mut candidates, &cwd.join("src-tauri").join("target"));
     }
 
     candidates.into_iter().find(|path| path.exists())
@@ -443,12 +495,25 @@ fn stage_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Result<PathBu
 
 #[cfg(windows)]
 fn registry_default_value(registry_key: &str) -> Option<String> {
+    registry_named_value(registry_key, None)
+}
+
+#[cfg(windows)]
+fn registry_named_value(registry_key: &str, value_name: Option<&str>) -> Option<String> {
     use std::process::Command;
 
-    let output = Command::new("reg")
-        .args(["query", registry_key, "/ve"])
-        .output()
-        .ok()?;
+    let mut command = Command::new("reg");
+    command.args(["query", registry_key]);
+    match value_name {
+        Some(value_name) => {
+            command.args(["/v", value_name]);
+        }
+        None => {
+            command.arg("/ve");
+        }
+    }
+
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -462,13 +527,6 @@ fn registry_default_value(registry_key: &str) -> Option<String> {
             None
         }
     })
-}
-
-#[cfg(windows)]
-fn manifest_registered_at(registry_key: &str, manifest_path: &Path) -> bool {
-    registry_default_value(registry_key)
-        .map(|value| PathBuf::from(value) == manifest_path)
-        .unwrap_or(false)
 }
 
 fn manifest_extension_id(manifest_path: &Path) -> Option<String> {
@@ -487,6 +545,109 @@ fn manifest_extension_id(manifest_path: &Path) -> Option<String> {
                 .and_then(|rest| rest.strip_suffix('/'))
                 .map(|s| s.to_string())
         })
+}
+
+fn browser_matches_manifest_kind(browser: Option<&str>, manifest_kind: BrowserManifestKind) -> bool {
+    let Some(browser) = browser else {
+        return false;
+    };
+    match manifest_kind {
+        BrowserManifestKind::ChromeLike => {
+            browser.eq_ignore_ascii_case("chromium")
+                || browser.eq_ignore_ascii_case("chrome")
+                || browser.eq_ignore_ascii_case("helium")
+        }
+        BrowserManifestKind::Edge => browser.eq_ignore_ascii_case("edge"),
+    }
+}
+
+fn browser_target(browser: &str) -> Option<&'static NativeBrowserTarget> {
+    native_browser_targets()
+        .iter()
+        .find(|target| target.id.eq_ignore_ascii_case(browser))
+}
+
+fn manifest_path_for_kind(manifest_dir: &Path, manifest_kind: BrowserManifestKind) -> PathBuf {
+    match manifest_kind {
+        BrowserManifestKind::ChromeLike => {
+            manifest_dir.join("com.velocitydl.native_host.chrome.json")
+        }
+        BrowserManifestKind::Edge => manifest_dir.join("com.velocitydl.native_host.edge.json"),
+    }
+}
+
+fn manifest_prefix_for_kind(manifest_kind: BrowserManifestKind) -> &'static str {
+    match manifest_kind {
+        BrowserManifestKind::ChromeLike => "chrome",
+        BrowserManifestKind::Edge => "chrome",
+    }
+}
+
+fn default_extension_id_for_manifest_kind(manifest_kind: BrowserManifestKind) -> &'static str {
+    match manifest_kind {
+        BrowserManifestKind::ChromeLike | BrowserManifestKind::Edge => {
+            CHROME_WEB_STORE_EXTENSION_ID
+        }
+    }
+}
+
+#[cfg(windows)]
+fn registered_manifest_status_for_target(
+    target: &NativeBrowserTarget,
+    expected_manifest_path: &Path,
+) -> (Option<String>, bool) {
+    let default_path = registry_default_value(target.registry_key);
+    let root_path = target
+        .root_value_registry_key
+        .and_then(|registry_key| registry_named_value(registry_key, Some("com.velocitydl.native_host")));
+
+    let default_matches = default_path
+        .as_ref()
+        .map(|value| PathBuf::from(value) == expected_manifest_path)
+        .unwrap_or(false);
+    let root_matches = match root_path.as_ref() {
+        Some(value) => PathBuf::from(value) == expected_manifest_path,
+        None => target.root_value_registry_key.is_none(),
+    };
+
+    let display_path = match (root_path, default_path) {
+        (Some(root), Some(default))
+            if PathBuf::from(&root) != expected_manifest_path
+                || PathBuf::from(&default) != expected_manifest_path =>
+        {
+            if PathBuf::from(&root) != expected_manifest_path {
+                Some(root)
+            } else {
+                Some(default)
+            }
+        }
+        (Some(root), _) => Some(root),
+        (None, Some(default)) => Some(default),
+        (None, None) => None,
+    };
+
+    (display_path, default_matches && root_matches)
+}
+
+fn resolve_browser_extension_id(
+    explicit_id: Option<String>,
+    manifest_id: Option<String>,
+    heartbeat_browser: Option<&str>,
+    heartbeat_runtime_id: Option<&str>,
+    manifest_kind: BrowserManifestKind,
+) -> Result<Option<String>, String> {
+    if let Some(value) = explicit_id.filter(|value| !value.trim().is_empty()) {
+        return validate_extension_id(&value).map(Some);
+    }
+    if let Some(value) = manifest_id.filter(|value| !value.trim().is_empty()) {
+        return validate_extension_id(&value).map(Some);
+    }
+    if browser_matches_manifest_kind(heartbeat_browser, manifest_kind) {
+        if let Some(value) = heartbeat_runtime_id.filter(|value| !value.trim().is_empty()) {
+            return validate_extension_id(value).map(Some);
+        }
+    }
+    validate_extension_id(default_extension_id_for_manifest_kind(manifest_kind)).map(Some)
 }
 
 #[cfg(windows)]
@@ -509,19 +670,38 @@ fn write_native_manifest(
 
 #[cfg(windows)]
 fn set_native_messaging_registry_value(registry_key: &str, manifest_path: &Path) -> Result<(), String> {
+    set_registry_string_value(registry_key, None, manifest_path)
+}
+
+#[cfg(windows)]
+fn set_native_messaging_registry_named_value(
+    registry_key: &str,
+    value_name: &str,
+    manifest_path: &Path,
+) -> Result<(), String> {
+    set_registry_string_value(registry_key, Some(value_name), manifest_path)
+}
+
+#[cfg(windows)]
+fn set_registry_string_value(
+    registry_key: &str,
+    value_name: Option<&str>,
+    manifest_path: &Path,
+) -> Result<(), String> {
     use std::process::Command;
 
-    let status = Command::new("reg")
-        .args([
-            "add",
-            registry_key,
-            "/ve",
-            "/t",
-            "REG_SZ",
-            "/d",
-            &manifest_path.to_string_lossy(),
-            "/f",
-        ])
+    let mut command = Command::new("reg");
+    command.arg("add").arg(registry_key);
+    match value_name {
+        Some(value_name) => {
+            command.args(["/v", value_name]);
+        }
+        None => {
+            command.arg("/ve");
+        }
+    }
+    let status = command
+        .args(["/t", "REG_SZ", "/d", &manifest_path.to_string_lossy(), "/f"])
         .status()
         .map_err(|e| e.to_string())?;
 
@@ -628,6 +808,95 @@ fn is_media_content_type(content_type: &str) -> bool {
         || ct.contains("application/vnd.apple.mpegurl")
         || ct.contains("application/x-mpegurl")
         || ct.contains("application/dash+xml")
+}
+
+fn is_page_like_content_type(content_type: &str) -> bool {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        ct.as_str(),
+        "text/html"
+            | "application/html"
+            | "application/xhtml+xml"
+            | "application/json"
+            | "text/json"
+            | "application/xml"
+            | "text/xml"
+            | "application/javascript"
+            | "text/javascript"
+    )
+}
+
+fn is_downloadable_file_extension(ext: &str) -> bool {
+    matches!(
+        ext.trim().to_ascii_lowercase().as_str(),
+        "zip"
+            | "7z"
+            | "rar"
+            | "tar"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "iso"
+            | "exe"
+            | "msi"
+            | "apk"
+            | "dmg"
+            | "pkg"
+            | "deb"
+            | "rpm"
+            | "pdf"
+            | "epub"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "ppt"
+            | "pptx"
+            | "txt"
+            | "csv"
+            | "json"
+            | "torrent"
+    )
+}
+
+fn direct_response_looks_downloadable(
+    url: &str,
+    content_type: Option<&str>,
+    content_disposition: Option<&str>,
+) -> bool {
+    if let Some(disposition) = content_disposition {
+        let lower = disposition.to_ascii_lowercase();
+        if lower.contains("attachment") || lower.contains("filename=") {
+            return true;
+        }
+    }
+
+    if let Some(content_type) = content_type {
+        if is_media_content_type(content_type) {
+            return true;
+        }
+        if is_page_like_content_type(content_type) {
+            return false;
+        }
+        let ct = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim()
+            .to_ascii_lowercase();
+        if ct.starts_with("application/") || ct.starts_with("image/") || ct == "text/plain" {
+            return true;
+        }
+    }
+
+    extension_from_path_like(url)
+        .map(|ext| is_likely_direct_media_url(url) || is_downloadable_file_extension(&ext))
+        .unwrap_or(false)
 }
 
 fn filename_from_content_disposition(value: &str) -> Option<String> {
@@ -926,6 +1195,104 @@ async fn detect_remote_file_hints<R: Runtime>(
     (filename, ext, size)
 }
 
+#[derive(Debug, Clone)]
+struct DirectDownloadProbe {
+    content_type: Option<String>,
+    content_disposition: Option<String>,
+    size: Option<u64>,
+}
+
+async fn validate_direct_download_target<R: Runtime>(
+    app: &AppHandle<R>,
+    url: &str,
+    headers: Option<&HashMap<String, String>>,
+    referrer: Option<&str>,
+) -> Result<DirectDownloadProbe, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(crate::request_context::DEFAULT_USER_AGENT)
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut merged_headers = crate::request_context::merge_request_headers(
+        headers,
+        auth_cookie_header(app).await.as_deref(),
+    );
+    if let Some(referrer) = referrer.filter(|value| !value.trim().is_empty()) {
+        merged_headers
+            .entry("Referer".to_string())
+            .or_insert_with(|| referrer.to_string());
+    }
+
+    let apply_headers = |mut req: reqwest::RequestBuilder| {
+        for (k, v) in &merged_headers {
+            req = req.header(k, v);
+        }
+        req
+    };
+
+    let inspect_response = |resp: &reqwest::Response| -> Result<DirectDownloadProbe, String> {
+        if !resp.status().is_success() {
+            return Err(format!("Direct download validation failed with HTTP {}", resp.status()));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+        let content_disposition = resp
+            .headers()
+            .get(CONTENT_DISPOSITION)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+        let mut size = resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+        if size.is_none() {
+            size = resp
+                .headers()
+                .get("content-range")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|v| v.split('/').next_back())
+                .and_then(|v| v.parse::<u64>().ok());
+        }
+
+        if !direct_response_looks_downloadable(
+            url,
+            content_type.as_deref(),
+            content_disposition.as_deref(),
+        ) {
+            return Err(format!(
+                "Direct URL returned a non-download response ({})",
+                content_type
+                    .clone()
+                    .unwrap_or_else(|| "unknown content type".to_string())
+            ));
+        }
+
+        Ok(DirectDownloadProbe {
+            content_type,
+            content_disposition,
+            size,
+        })
+    };
+
+    if let Ok(resp) = apply_headers(client.head(url)).send().await {
+        if let Ok(result) = inspect_response(&resp) {
+            return Ok(result);
+        }
+    }
+
+    let resp = apply_headers(client.get(url).header(RANGE, "bytes=0-0"))
+        .send()
+        .await
+        .map_err(|e| format!("Direct download validation request failed: {e}"))?;
+    inspect_response(&resp)
+}
+
 async fn resolve_download_hints<R: Runtime>(
     app: &AppHandle<R>,
     url: &str,
@@ -969,8 +1336,6 @@ pub async fn get_extension_health<R: Runtime>(
 ) -> Result<ExtensionHealthResponse, String> {
     const HEARTBEAT_FRESH_MS: u64 = 6 * 60 * 1000;
     const HEARTBEAT_STALE_MS: u64 = 24 * 60 * 60 * 1000;
-    const INSTALL_URL: &str = "https://github.com/notvikke/velocity-dl/tree/main/chromium-extension";
-    const SETUP_URL: &str = "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md";
 
     let snapshot = health.snapshot().await;
     let now_ms = std::time::SystemTime::now()
@@ -999,8 +1364,8 @@ pub async fn get_extension_health<R: Runtime>(
     };
 
     Ok(ExtensionHealthResponse {
-        install_url: INSTALL_URL.to_string(),
-        setup_url: SETUP_URL.to_string(),
+        install_url: CHROME_WEB_STORE_INSTALL_URL.to_string(),
+        setup_url: FALLBACK_SETUP_URL.to_string(),
         last_heartbeat_at_ms: snapshot.last_heartbeat_at_ms,
         last_seen_browser: snapshot.last_seen_browser,
         last_seen_extension_version: snapshot.last_seen_extension_version,
@@ -1016,8 +1381,8 @@ pub async fn get_browser_integration_status<R: Runtime>(
     health: State<'_, ExtensionHealthState>,
 ) -> Result<BrowserIntegrationStatus, String> {
     let manifest_dir = native_manifest_output_dir()?;
-    let chrome_manifest = manifest_dir.join("com.velocitydl.native_host.chrome.json");
-    let edge_manifest = manifest_dir.join("com.velocitydl.native_host.edge.json");
+    let chrome_manifest = manifest_path_for_kind(&manifest_dir, BrowserManifestKind::ChromeLike);
+    let edge_manifest = manifest_path_for_kind(&manifest_dir, BrowserManifestKind::Edge);
     let chrome_manifest_id = manifest_extension_id(&chrome_manifest);
     let edge_manifest_id = manifest_extension_id(&edge_manifest);
     let chrome_manifest_id_readable = chrome_manifest_id.is_some();
@@ -1025,55 +1390,86 @@ pub async fn get_browser_integration_status<R: Runtime>(
     let health_snapshot = health.snapshot().await;
     let last_runtime_id = health_snapshot.last_seen_runtime_id.clone();
     let last_browser = health_snapshot.last_seen_browser.clone();
-    let chrome_runtime_matches_manifest = last_browser
-        .as_deref()
-        .map(|browser| browser.eq_ignore_ascii_case("chromium") || browser.eq_ignore_ascii_case("chrome"))
-        .unwrap_or(false)
+    let chrome_runtime_matches_manifest = browser_matches_manifest_kind(
+        last_browser.as_deref(),
+        BrowserManifestKind::ChromeLike,
+    )
         && last_runtime_id.is_some()
         && last_runtime_id == chrome_manifest_id;
-    let edge_runtime_matches_manifest = last_browser
-        .as_deref()
-        .map(|browser| browser.eq_ignore_ascii_case("edge"))
-        .unwrap_or(false)
+    let edge_runtime_matches_manifest = browser_matches_manifest_kind(
+        last_browser.as_deref(),
+        BrowserManifestKind::Edge,
+    )
         && last_runtime_id.is_some()
         && last_runtime_id == edge_manifest_id;
+
     #[cfg(windows)]
-    let chrome_registered = manifest_registered_at(
-        r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host",
+    let (chrome_registered_manifest_path, chrome_registered) = registered_manifest_status_for_target(
+        browser_target("chrome").expect("chrome target"),
         &chrome_manifest,
     );
     #[cfg(not(windows))]
-    let chrome_registered = false;
+    let (chrome_registered_manifest_path, chrome_registered): (Option<String>, bool) = (None, false);
     #[cfg(windows)]
-    let edge_registered = manifest_registered_at(
-        r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host",
+    let (chromium_registered_manifest_path, chromium_registered) = registered_manifest_status_for_target(
+        browser_target("chromium").expect("chromium target"),
+        &chrome_manifest,
+    );
+    #[cfg(not(windows))]
+    let (chromium_registered_manifest_path, chromium_registered): (Option<String>, bool) = (None, false);
+    #[cfg(windows)]
+    let (helium_registered_manifest_path, helium_registered) = registered_manifest_status_for_target(
+        browser_target("helium").expect("helium target"),
+        &chrome_manifest,
+    );
+    #[cfg(not(windows))]
+    let (helium_registered_manifest_path, helium_registered): (Option<String>, bool) = (None, false);
+    #[cfg(windows)]
+    let (edge_registered_manifest_path, edge_registered) = registered_manifest_status_for_target(
+        browser_target("edge").expect("edge target"),
         &edge_manifest,
     );
     #[cfg(not(windows))]
-    let edge_registered = false;
+    let (edge_registered_manifest_path, edge_registered): (Option<String>, bool) = (None, false);
 
     Ok(BrowserIntegrationStatus {
         extension_directory: resolve_extension_directory(&app)
             .map(|path| path.to_string_lossy().to_string()),
         native_host_path: resolve_native_host_executable(&app)
             .map(|path| path.to_string_lossy().to_string()),
+        webstore_extension_id: CHROME_WEB_STORE_EXTENSION_ID.to_string(),
+        webstore_install_url: CHROME_WEB_STORE_INSTALL_URL.to_string(),
         chrome_available: find_browser_executable("chrome").is_some(),
+        helium_available: find_browser_executable("helium").is_some(),
         edge_available: find_browser_executable("edge").is_some(),
         chrome_manifest_installed: chrome_manifest.exists() && chrome_registered,
+        chromium_manifest_installed: chrome_manifest.exists() && chromium_registered,
+        helium_manifest_installed: chrome_manifest.exists() && helium_registered,
         edge_manifest_installed: edge_manifest.exists() && edge_registered,
         chrome_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
+        chromium_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
+        helium_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
         edge_manifest_path: edge_manifest.exists().then(|| edge_manifest.to_string_lossy().to_string()),
+        chrome_registered_manifest_path,
+        chromium_registered_manifest_path,
+        helium_registered_manifest_path,
+        edge_registered_manifest_path,
         chrome_manifest_extension_id: chrome_manifest_id,
+        chromium_manifest_extension_id: manifest_extension_id(&chrome_manifest),
+        helium_manifest_extension_id: manifest_extension_id(&chrome_manifest),
         edge_manifest_extension_id: edge_manifest_id,
         last_seen_runtime_id: last_runtime_id,
         last_seen_browser: last_browser,
         last_heartbeat_at_ms: health_snapshot.last_heartbeat_at_ms,
         chrome_runtime_matches_manifest,
+        chromium_runtime_matches_manifest: chrome_runtime_matches_manifest,
+        helium_runtime_matches_manifest: chrome_runtime_matches_manifest,
         edge_runtime_matches_manifest,
         chrome_manifest_id_readable,
+        chromium_manifest_id_readable: manifest_extension_id(&chrome_manifest).is_some(),
+        helium_manifest_id_readable: manifest_extension_id(&chrome_manifest).is_some(),
         edge_manifest_id_readable,
-        docs_url: "https://github.com/notvikke/velocity-dl/blob/main/BROWSER_INTEGRATION_SETUP.md"
-            .to_string(),
+        docs_url: FALLBACK_SETUP_URL.to_string(),
     })
 }
 
@@ -1112,6 +1508,34 @@ pub async fn update_tool_binary<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn open_browser_install_page<R: Runtime>(
+    _app: AppHandle<R>,
+    browser: String,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+
+        let browser_key = browser.trim().to_ascii_lowercase();
+        let target =
+            browser_target(&browser_key).ok_or_else(|| "Unsupported browser".to_string())?;
+        let browser_exe = find_browser_executable(target.id)
+            .ok_or_else(|| format!("{} is not installed on this PC", target.label))?;
+
+        Command::new(browser_exe)
+            .arg("--new-window")
+            .arg(target.install_url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Browser-specific setup is only implemented on Windows right now".to_string())
+}
+
+#[tauri::command]
 pub async fn open_browser_extensions_page<R: Runtime>(
     _app: AppHandle<R>,
     browser: String,
@@ -1121,17 +1545,14 @@ pub async fn open_browser_extensions_page<R: Runtime>(
         use std::process::Command;
 
         let browser_key = browser.trim().to_ascii_lowercase();
-        let browser_exe = find_browser_executable(&browser_key)
-            .ok_or_else(|| format!("{} is not installed on this PC", browser))?;
-        let extensions_url = match browser_key.as_str() {
-            "chrome" => "chrome://extensions",
-            "edge" => "edge://extensions",
-            _ => return Err("Unsupported browser".to_string()),
-        };
+        let target =
+            browser_target(&browser_key).ok_or_else(|| "Unsupported browser".to_string())?;
+        let browser_exe = find_browser_executable(target.id)
+            .ok_or_else(|| format!("{} is not installed on this PC", target.label))?;
 
         Command::new(browser_exe)
             .arg("--new-window")
-            .arg(extensions_url)
+            .arg(target.extensions_url)
             .spawn()
             .map_err(|e| e.to_string())?;
 
@@ -1151,48 +1572,77 @@ pub async fn install_browser_integration<R: Runtime>(
     #[cfg(windows)]
     {
         let host_path = stage_native_host_executable(&app)?;
-        let _ = stage_extension_directory(&app)?;
-
-        let chrome_id = match chrome_extension_id {
-            Some(value) if !value.trim().is_empty() => Some(validate_extension_id(&value)?),
-            _ => None,
-        };
-        let edge_id = match edge_extension_id {
-            Some(value) if !value.trim().is_empty() => Some(validate_extension_id(&value)?),
-            _ => None,
-        };
-
-        if chrome_id.is_none() && edge_id.is_none() {
-            return Err("Enter at least one browser extension ID before installing".to_string());
-        }
-
         let manifest_dir = native_manifest_output_dir()?;
         std::fs::create_dir_all(&manifest_dir).map_err(|e| e.to_string())?;
+        let chrome_manifest = manifest_path_for_kind(&manifest_dir, BrowserManifestKind::ChromeLike);
+        let edge_manifest = manifest_path_for_kind(&manifest_dir, BrowserManifestKind::Edge);
+        let health_snapshot = app.state::<ExtensionHealthState>().snapshot().await;
+
+        let chrome_id = resolve_browser_extension_id(
+            chrome_extension_id,
+            manifest_extension_id(&chrome_manifest),
+            health_snapshot.last_seen_browser.as_deref(),
+            health_snapshot.last_seen_runtime_id.as_deref(),
+            BrowserManifestKind::ChromeLike,
+        )?;
+        let edge_id = resolve_browser_extension_id(
+            edge_extension_id,
+            manifest_extension_id(&edge_manifest),
+            health_snapshot.last_seen_browser.as_deref(),
+            health_snapshot.last_seen_runtime_id.as_deref(),
+            BrowserManifestKind::Edge,
+        )?;
 
         let mut installed = Vec::new();
         let mut chrome_manifest_path = None;
         let mut edge_manifest_path = None;
 
         if let Some(chrome_id) = chrome_id {
-            let out_path = manifest_dir.join("com.velocitydl.native_host.chrome.json");
-            write_native_manifest(&out_path, &host_path, &chrome_id, "chrome")?;
-            set_native_messaging_registry_value(
-                r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host",
-                &out_path,
+            write_native_manifest(
+                &chrome_manifest,
+                &host_path,
+                &chrome_id,
+                manifest_prefix_for_kind(BrowserManifestKind::ChromeLike),
             )?;
-            installed.push("Chrome");
-            chrome_manifest_path = Some(out_path.to_string_lossy().to_string());
+            for target in native_browser_targets()
+                .iter()
+                .filter(|target| target.manifest_kind == BrowserManifestKind::ChromeLike)
+            {
+                set_native_messaging_registry_value(target.registry_key, &chrome_manifest)?;
+                if let Some(registry_key) = target.root_value_registry_key {
+                    set_native_messaging_registry_named_value(
+                        registry_key,
+                        "com.velocitydl.native_host",
+                        &chrome_manifest,
+                    )?;
+                }
+                installed.push(target.label);
+            }
+            chrome_manifest_path = Some(chrome_manifest.to_string_lossy().to_string());
         }
 
         if let Some(edge_id) = edge_id {
-            let out_path = manifest_dir.join("com.velocitydl.native_host.edge.json");
-            write_native_manifest(&out_path, &host_path, &edge_id, "chrome")?;
-            set_native_messaging_registry_value(
-                r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host",
-                &out_path,
+            write_native_manifest(
+                &edge_manifest,
+                &host_path,
+                &edge_id,
+                manifest_prefix_for_kind(BrowserManifestKind::Edge),
             )?;
-            installed.push("Edge");
-            edge_manifest_path = Some(out_path.to_string_lossy().to_string());
+            for target in native_browser_targets()
+                .iter()
+                .filter(|target| target.manifest_kind == BrowserManifestKind::Edge)
+            {
+                set_native_messaging_registry_value(target.registry_key, &edge_manifest)?;
+                if let Some(registry_key) = target.root_value_registry_key {
+                    set_native_messaging_registry_named_value(
+                        registry_key,
+                        "com.velocitydl.native_host",
+                        &edge_manifest,
+                    )?;
+                }
+                installed.push(target.label);
+            }
+            edge_manifest_path = Some(edge_manifest.to_string_lossy().to_string());
         }
 
         return Ok(BrowserIntegrationInstallResult {
@@ -1374,7 +1824,7 @@ pub async fn fetch_metadata<R: Runtime>(
     match result {
         Ok(metadata) => Ok(metadata),
         Err(first_err) => {
-            // First attempt failed — force-update yt-dlp and retry once
+            // First attempt failed - force-update yt-dlp and retry once
             log::warn!(
                 "yt-dlp metadata fetch failed, forcing update and retrying: {}",
                 first_err
@@ -1503,8 +1953,22 @@ pub async fn add_download<R: Runtime>(
     browser_request_id: Option<String>,
     original_url: Option<String>,
     referrer: Option<String>,
+    request_method: Option<String>,
+    request_body: Option<NativeRequestBody>,
+    network_request_id: Option<String>,
 ) -> Result<DownloadItem, String> {
     let id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let normalized_request_method = request_method
+        .as_deref()
+        .unwrap_or("GET")
+        .trim()
+        .to_ascii_uppercase();
+    if normalized_request_method != "GET" && normalized_request_method != "POST" {
+        return Err(format!("Unsupported browser request method '{normalized_request_method}'"));
+    }
+    if normalized_request_method == "POST" && request_body.is_none() {
+        return Err("The browser reported a POST download but its body was unavailable. Re-submit the download from the browser.".to_string());
+    }
     let merged_probe_headers =
         crate::request_context::merge_request_headers(headers.as_ref(), auth_cookie_header(&app).await.as_deref());
     emit_download_attempt(
@@ -1515,9 +1979,13 @@ pub async fn add_download<R: Runtime>(
         AttemptStatus::Running,
         None,
     );
-    let mut strategy = strategy_hint_to_media_strategy(strategy_hint.as_deref())
-        .unwrap_or_else(|| classify_media_strategy(&url));
-    if audio_url.is_none() && matches!(strategy, MediaStrategy::MetadataExtractor) {
+    let mut strategy = if normalized_request_method == "POST" {
+        MediaStrategy::DirectFile
+    } else {
+        strategy_hint_to_media_strategy(strategy_hint.as_deref())
+            .unwrap_or_else(|| classify_media_strategy(&url))
+    };
+    if normalized_request_method == "GET" && audio_url.is_none() && matches!(strategy, MediaStrategy::MetadataExtractor) {
         emit_download_attempt(
             &app,
             attempt_session_id.as_deref(),
@@ -1551,6 +2019,48 @@ pub async fn add_download<R: Runtime>(
             );
         }
     }
+    let mut direct_download_probe: Option<DirectDownloadProbe> = None;
+    if normalized_request_method == "GET" && audio_url.is_none() && matches!(strategy, MediaStrategy::DirectFile) {
+        emit_download_attempt(
+            &app,
+            attempt_session_id.as_deref(),
+            "validate_direct_url",
+            "Validate direct download response",
+            AttemptStatus::Running,
+            None,
+        );
+        match validate_direct_download_target(&app, &url, headers.as_ref(), referrer.as_deref()).await {
+            Ok(validation) => {
+                let detail = validation
+                    .content_type
+                    .clone()
+                    .or(validation.content_disposition.clone())
+                    .unwrap_or_else(|| "Downloadable response confirmed".to_string());
+                direct_download_probe = Some(validation);
+                emit_download_attempt(
+                    &app,
+                    attempt_session_id.as_deref(),
+                    "validate_direct_url",
+                    "Validate direct download response",
+                    AttemptStatus::Succeeded,
+                    Some(detail),
+                );
+            }
+            Err(error) => {
+                emit_download_attempt(
+                    &app,
+                    attempt_session_id.as_deref(),
+                    "validate_direct_url",
+                    "Validate direct download response",
+                    AttemptStatus::Failed,
+                    Some(error.clone()),
+                );
+                return Err(format!(
+                    "{error}. The browser handoff URL did not validate as a real downloadable file response, so VelocityDL stopped before queueing a fake completion."
+                ));
+            }
+        }
+    }
     emit_download_attempt(
         &app,
         attempt_session_id.as_deref(),
@@ -1567,7 +2077,12 @@ pub async fn add_download<R: Runtime>(
         AttemptStatus::Running,
         None,
     );
-    let (final_title, detected_size) =
+    let (final_title, detected_size) = if normalized_request_method == "POST" {
+        (
+            resolve_title_from_hints(&url, title.as_deref(), None, None, strategy),
+            None,
+        )
+    } else {
         resolve_download_hints(
             &app,
             &url,
@@ -1575,7 +2090,8 @@ pub async fn add_download<R: Runtime>(
             headers.as_ref(),
             browser_source.as_deref(),
         )
-        .await;
+        .await
+    };
     emit_download_attempt(
         &app,
         attempt_session_id.as_deref(),
@@ -1584,10 +2100,16 @@ pub async fn add_download<R: Runtime>(
         AttemptStatus::Succeeded,
         Some(final_title.clone()),
     );
-    let resolved_total_size = match total_size {
+    let resolved_total_size = if normalized_request_method == "POST" {
+        0
+    } else { match total_size {
         Some(v) if v > 0 => v,
-        _ => detected_size.unwrap_or(0),
-    };
+        _ => direct_download_probe
+            .as_ref()
+            .and_then(|probe| probe.size)
+            .or(detected_size)
+            .unwrap_or(0),
+    }};
 
     let item = DownloadItem {
         id: id.clone(),
@@ -1610,6 +2132,9 @@ pub async fn add_download<R: Runtime>(
         browser_request_id,
         original_url,
         referrer,
+        request_method: Some(normalized_request_method),
+        request_body,
+        network_request_id,
     };
 
     emit_download_attempt(
@@ -1778,8 +2303,10 @@ pub async fn start_sniffing<R: Runtime>(app: AppHandle<R>, url: String) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        has_trustworthy_filename_hint, resolve_title_from_hints, strategy_from_detected_ext,
-        strategy_hint_to_media_strategy,
+        direct_response_looks_downloadable, has_trustworthy_filename_hint,
+        is_page_like_content_type, native_browser_targets, resolve_title_from_hints,
+        resolve_browser_extension_id, strategy_from_detected_ext,
+        strategy_hint_to_media_strategy, BrowserManifestKind,
     };
     use crate::protocols::strategy::MediaStrategy;
 
@@ -1848,5 +2375,155 @@ mod tests {
             Some(MediaStrategy::DashManifest)
         );
         assert_eq!(strategy_hint_to_media_strategy(Some("unknown")), None);
+    }
+
+    #[test]
+    fn browser_downloads_api_takeover_rejects_page_like_direct_validation() {
+        assert!(!direct_response_looks_downloadable(
+            "https://store1.gofile.io/download/web/xyz/NTRonpa_Public_DebugV3.zip",
+            Some("text/html; charset=UTF-8"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn non_takeover_or_non_direct_browser_routes_still_validate_direct_downloads() {
+        assert!(direct_response_looks_downloadable(
+            "https://example.com/download/NTRonpa_Public_DebugV3.zip",
+            Some("application/octet-stream"),
+            None,
+        ));
+        assert!(direct_response_looks_downloadable(
+            "https://example.com/download",
+            Some("text/html"),
+            Some("attachment; filename=\"NTRonpa_Public_DebugV3.zip\""),
+        ));
+    }
+
+    #[test]
+    fn page_like_content_types_are_rejected_for_direct_download_validation() {
+        assert!(is_page_like_content_type("text/html; charset=utf-8"));
+        assert!(is_page_like_content_type("application/json"));
+        assert!(!is_page_like_content_type("application/octet-stream"));
+    }
+
+    #[test]
+    fn direct_download_validation_accepts_binary_and_attachment_responses() {
+        assert!(direct_response_looks_downloadable(
+            "https://example.com/file.7z",
+            Some("application/octet-stream"),
+            None,
+        ));
+        assert!(direct_response_looks_downloadable(
+            "https://example.com/download",
+            Some("text/html"),
+            Some("attachment; filename=\"archive.7z\""),
+        ));
+    }
+
+    #[test]
+    fn direct_download_validation_rejects_page_responses() {
+        assert!(!direct_response_looks_downloadable(
+            "https://store.gofile.io/download/web/abc/file.7z",
+            Some("text/html; charset=utf-8"),
+            None,
+        ));
+        assert!(!direct_response_looks_downloadable(
+            "https://example.com/api/download",
+            Some("application/json"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn native_browser_targets_include_helium_registry_root() {
+        let helium = native_browser_targets()
+            .iter()
+            .find(|target| target.id == "helium")
+            .expect("expected Helium browser target");
+
+        assert_eq!(
+            helium.registry_key,
+            r"HKCU\Software\imput\Helium\NativeMessagingHosts\com.velocitydl.native_host"
+        );
+        assert_eq!(
+            helium.root_value_registry_key,
+            Some(r"HKCU\Software\imput\Helium\NativeMessagingHosts")
+        );
+        assert_eq!(helium.manifest_kind, BrowserManifestKind::ChromeLike);
+    }
+
+    #[test]
+    fn native_browser_targets_include_chromium_fallback_registry_root() {
+        let chromium = native_browser_targets()
+            .iter()
+            .find(|target| target.id == "chromium")
+            .expect("expected Chromium browser target");
+
+        assert_eq!(
+            chromium.registry_key,
+            r"HKCU\Software\Chromium\NativeMessagingHosts\com.velocitydl.native_host"
+        );
+        assert_eq!(
+            chromium.root_value_registry_key,
+            Some(r"HKCU\Software\Chromium\NativeMessagingHosts")
+        );
+        assert_eq!(chromium.manifest_kind, BrowserManifestKind::ChromeLike);
+    }
+
+    #[test]
+    fn chrome_like_browser_targets_use_webstore_install_page() {
+        let chrome = native_browser_targets()
+            .iter()
+            .find(|target| target.id == "chrome")
+            .expect("expected Chrome browser target");
+        let helium = native_browser_targets()
+            .iter()
+            .find(|target| target.id == "helium")
+            .expect("expected Helium browser target");
+
+        assert_eq!(
+            chrome.install_url,
+            "https://chromewebstore.google.com/detail/velocitydl-bridge/alnagakehjhbfkdianlkmcncefldpmhm"
+        );
+        assert_eq!(helium.install_url, chrome.install_url);
+    }
+
+    #[test]
+    fn chrome_like_manifest_defaults_to_webstore_extension_id() {
+        let resolved = resolve_browser_extension_id(
+            None,
+            None,
+            None,
+            None,
+            BrowserManifestKind::ChromeLike,
+        )
+        .expect("resolution should not fail");
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("alnagakehjhbfkdianlkmcncefldpmhm")
+        );
+    }
+
+    #[test]
+    fn chrome_like_targets_share_the_same_manifest_kind() {
+        let targets = native_browser_targets();
+        let chrome = targets
+            .iter()
+            .find(|target| target.id == "chrome")
+            .expect("expected Chrome browser target");
+        let chromium = targets
+            .iter()
+            .find(|target| target.id == "chromium")
+            .expect("expected Chromium browser target");
+        let helium = targets
+            .iter()
+            .find(|target| target.id == "helium")
+            .expect("expected Helium browser target");
+
+        assert_eq!(chrome.manifest_kind, BrowserManifestKind::ChromeLike);
+        assert_eq!(chromium.manifest_kind, BrowserManifestKind::ChromeLike);
+        assert_eq!(helium.manifest_kind, BrowserManifestKind::ChromeLike);
     }
 }

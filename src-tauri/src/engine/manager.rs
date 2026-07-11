@@ -17,6 +17,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use base64::Engine as _;
 
 async fn auth_cookie_header<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     let auth_manager = app.try_state::<crate::auth::store::AuthManager>()?;
@@ -172,7 +173,7 @@ impl DownloadManager {
         let config_dir = crate::pathing::config_dir_for_app(&app)
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        let settings = AppSettings::load(config_dir).await;
+        let settings = AppSettings::load(config_dir.clone()).await;
         speed_limiter.set_limit_mb(settings.speed_limit_mb).await;
 
         let final_output_path = PathBuf::from(&item.output_path).join(&item.title);
@@ -372,18 +373,36 @@ impl DownloadManager {
         let mut video_headers = crate::request_context::to_headermap(item.headers.as_ref());
         crate::request_context::add_cookie_to_headermap(&mut video_headers, auth_cookie.as_deref());
         crate::request_context::ensure_default_runtime_headers(&mut video_headers);
+        let request_method = reqwest::Method::from_bytes(
+            item.request_method.as_deref().unwrap_or("GET").as_bytes(),
+        )?;
+        let request_body = match item.request_body.as_ref() {
+            Some(body) if body.encoding == "utf8" => Some(body.data.clone().unwrap_or_default().into_bytes()),
+            Some(body) if body.encoding == "base64" => Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(body.data.as_deref().unwrap_or_default())?,
+            ),
+            Some(body) => anyhow::bail!("Unsupported captured request body encoding '{}'", body.encoding),
+            None => None,
+        };
 
         if !is_multi_track {
             // SINGLE TRACK DOWNLOAD (Existing Logic)
             if item.total_size == 0 {
-                let downloader = Arc::new(Downloader::new(
+                let mut downloader = Downloader::new_with_request(
                     item.url.clone(),
                     0,
                     vec![Segment::new(0, 0)],
                     final_output_path.clone(),
                     video_headers,
                     speed_limiter.clone(),
-                ));
+                    request_method.clone(),
+                    request_body.clone(),
+                );
+                if let Some(network_request_id) = item.network_request_id.clone() {
+                    downloader = downloader.with_session_refresh(config_dir.clone(), network_request_id);
+                }
+                let downloader = Arc::new(downloader);
 
                 let mut speed_calc = SpeedCalculator::new();
                 let progress_downloader = downloader.clone();
@@ -442,14 +461,18 @@ impl DownloadManager {
             } else {
                 preallocate_file(&final_output_path, item.total_size).await?;
                 let segments = calculate_segments(item.total_size, video_threads);
-                let downloader = Arc::new(Downloader::new(
+                let mut downloader = Downloader::new(
                     item.url.clone(),
                     item.total_size,
                     segments.clone(),
                     final_output_path.clone(),
                     video_headers,
                     speed_limiter.clone(),
-                ));
+                );
+                if let Some(network_request_id) = item.network_request_id.clone() {
+                    downloader = downloader.with_session_refresh(config_dir.clone(), network_request_id);
+                }
+                let downloader = Arc::new(downloader);
 
                 let mut segment_tasks = Vec::new();
                 for i in 0..video_threads {

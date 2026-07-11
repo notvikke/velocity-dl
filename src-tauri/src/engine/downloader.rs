@@ -8,9 +8,10 @@ use reqwest::StatusCode;
 use reqwest::{header, Client};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -25,9 +26,19 @@ pub struct Downloader {
     pub total_size: u64,
     pub output_path: PathBuf,
     pub url: String,
-    pub headers: header::HeaderMap,
+    pub headers: Arc<RwLock<header::HeaderMap>>,
+    request_method: reqwest::Method,
+    request_body: Option<bytes::Bytes>,
     pub cancel_token: CancellationToken,
     speed_limiter: GlobalSpeedLimiter,
+    session_refresh: Option<SessionRefreshContext>,
+    session_refresh_attempted: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct SessionRefreshContext {
+    config_dir: PathBuf,
+    network_request_id: String,
 }
 
 impl Downloader {
@@ -38,6 +49,28 @@ impl Downloader {
         output_path: PathBuf,
         headers: header::HeaderMap,
         speed_limiter: GlobalSpeedLimiter,
+    ) -> Self {
+        Self::new_with_request(
+            url,
+            total_size,
+            segments,
+            output_path,
+            headers,
+            speed_limiter,
+            reqwest::Method::GET,
+            None,
+        )
+    }
+
+    pub fn new_with_request(
+        url: String,
+        total_size: u64,
+        segments: Vec<Segment>,
+        output_path: PathBuf,
+        headers: header::HeaderMap,
+        speed_limiter: GlobalSpeedLimiter,
+        request_method: reqwest::Method,
+        request_body: Option<Vec<u8>>,
     ) -> Self {
         Self {
             client: Client::builder()
@@ -50,10 +83,41 @@ impl Downloader {
             total_size,
             output_path,
             url,
-            headers,
+            headers: Arc::new(RwLock::new(headers)),
+            request_method,
+            request_body: request_body.map(bytes::Bytes::from),
             cancel_token: CancellationToken::new(),
             speed_limiter,
+            session_refresh: None,
+            session_refresh_attempted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn with_session_refresh(mut self, config_dir: PathBuf, network_request_id: String) -> Self {
+        self.session_refresh = Some(SessionRefreshContext { config_dir, network_request_id });
+        self
+    }
+
+    async fn send_segment_request(&self, segment: &Segment) -> Result<reqwest::Response> {
+        let mut request = self.client.request(self.request_method.clone(), &self.url);
+        if let Some(body) = &self.request_body { request = request.body(body.clone()); }
+        let headers = self.headers.read().await;
+        let mut has_ua = false;
+        let mut has_referer = false;
+        for (key, value) in headers.iter() {
+            has_ua |= key == header::USER_AGENT;
+            has_referer |= key == header::REFERER;
+            request = request.header(key, value);
+        }
+        drop(headers);
+        if !has_ua { request = request.header(header::USER_AGENT, APP_USER_AGENT); }
+        if !has_referer && self.url.contains("googlevideo.com") {
+            request = request.header(header::REFERER, "https://www.youtube.com/");
+        }
+        if self.total_size > 0 {
+            request = request.header(header::RANGE, format!("bytes={}-{}", segment.current, segment.end));
+        }
+        request.send().await.context("Failed to send captured browser request")
     }
 
     pub async fn download_segment(&self, segment_index: usize) -> Result<()> {
@@ -134,38 +198,28 @@ impl Downloader {
             }
         }
 
-        let mut request = self.client.get(&self.url);
-
-        let mut has_ua = false;
-        let mut has_referer = false;
-
-        for (key, value) in &self.headers {
-            if key == header::USER_AGENT {
-                has_ua = true;
-            }
-            if key == header::REFERER {
-                has_referer = true;
-            }
-            request = request.header(key, value);
+        if self.total_size > 0 && self.request_method != reqwest::Method::GET {
+            return Err(anyhow!("Ranged downloads require GET; captured request used {}", self.request_method));
         }
-
-        if !has_ua {
-            request = request.header(header::USER_AGENT, APP_USER_AGENT);
-        }
-        if !has_referer && self.url.contains("googlevideo.com") {
-            request = request.header(header::REFERER, "https://www.youtube.com/");
-        }
-
-        if self.total_size > 0 {
-            let range = format!("bytes={}-{}", segment.current, segment.end);
-            request = request.header(header::RANGE, range);
-        }
-
         let requested_range_start = segment.current;
-        let response = request
-            .send()
-            .await
+        let mut response = self.send_segment_request(&segment).await
             .with_context(|| format!("Failed to send request for segment {}", segment_index))?;
+        if matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            if let Some(refresh) = self.session_refresh.as_ref()
+                .filter(|_| !self.session_refresh_attempted.swap(true, Ordering::AcqRel))
+            {
+                let fresh = crate::browser_session::request_session_refresh(
+                    &refresh.config_dir,
+                    &self.url,
+                    &refresh.network_request_id,
+                ).await.map_err(anyhow::Error::msg)?;
+                let fresh_headers = crate::request_context::to_headermap(Some(&fresh.headers));
+                let mut headers = self.headers.write().await;
+                for (name, value) in fresh_headers { if let Some(name) = name { headers.insert(name, value); } }
+                drop(headers);
+                response = self.send_segment_request(&segment).await?;
+            }
+        }
 
         let status = response.status();
 
@@ -201,6 +255,7 @@ impl Downloader {
 
         let mut writer = BufWriter::new(file);
         let mut stream = response.bytes_stream();
+        let mut wrote_any_bytes = false;
 
         loop {
             if self.cancel_token.is_cancelled() {
@@ -215,6 +270,9 @@ impl Downloader {
                     })?;
                     self.speed_limiter.acquire(chunk.len()).await;
                     writer.write_all(&chunk).await?;
+                    if !chunk.is_empty() {
+                        wrote_any_bytes = true;
+                    }
                     let mut segments = self.segments.lock().await;
                     segments[segment_index].current += chunk.len() as u64;
                 }
@@ -231,6 +289,13 @@ impl Downloader {
         }
 
         writer.flush().await?;
+
+        if self.total_size == 0 && !wrote_any_bytes {
+            return Err(anyhow!(
+                "Segment {} returned an empty response body",
+                segment_index
+            ));
+        }
 
         let mut segments = self.segments.lock().await;
         segments[segment_index].finished = true;
@@ -253,7 +318,12 @@ fn should_truncate_segment_output(total_size: u64, segment_index: usize) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::should_truncate_segment_output;
+    use super::{should_truncate_segment_output, Downloader};
+    use crate::engine::rate_limiter::GlobalSpeedLimiter;
+    use crate::engine::segmenter::Segment;
+    use reqwest::header::HeaderMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn unknown_size_single_stream_starts_from_clean_file() {
@@ -264,5 +334,74 @@ mod tests {
     fn ranged_segment_downloads_keep_append_resume_behavior() {
         assert!(!should_truncate_segment_output(1024, 0));
         assert!(!should_truncate_segment_output(1024, 1));
+    }
+
+    #[tokio::test]
+    async fn unknown_size_single_stream_rejects_empty_success_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "velocitydl-empty-direct-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        let downloader = Downloader::new(
+            format!("http://{addr}/empty.bin"),
+            0,
+            vec![Segment::new(0, 0)],
+            temp_path.clone(),
+            HeaderMap::new(),
+            GlobalSpeedLimiter::new(),
+        );
+
+        let result = downloader.download_segment(0).await;
+        server.await.unwrap();
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        assert!(result.is_err());
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("empty response body"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn unknown_size_single_stream_replays_post_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 2048];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /export HTTP/1.1"), "{request}");
+            assert!(request.ends_with("format=csv"), "{request}");
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na,b").await.unwrap();
+        });
+        let temp_path = std::env::temp_dir().join(format!("velocitydl-post-{}.csv", uuid::Uuid::new_v4()));
+        let downloader = Downloader::new_with_request(
+            format!("http://{addr}/export"),
+            0,
+            vec![Segment::new(0, 0)],
+            temp_path.clone(),
+            HeaderMap::new(),
+            GlobalSpeedLimiter::new(),
+            reqwest::Method::POST,
+            Some(b"format=csv".to_vec()),
+        );
+        downloader.download_segment(0).await.unwrap();
+        server.await.unwrap();
+        let body = tokio::fs::read(&temp_path).await.unwrap();
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        assert_eq!(body, b"a,b");
     }
 }

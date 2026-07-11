@@ -7,7 +7,8 @@ use crate::ipc::commands::{
     ack_external_capture_request, add_download, fetch_metadata, get_app_diagnostics,
     delete_download_artifacts,
     get_browser_integration_status, get_extension_health, get_settings, get_tooling_status,
-    install_browser_integration, open_browser_extensions_page, open_extension_setup_link, open_folder,
+    install_browser_integration, open_browser_extensions_page, open_browser_install_page,
+    open_extension_setup_link, open_folder,
     pause_download, reveal_main_window, save_settings, set_external_capture_listener_ready, start_sniffing,
     update_tool_binary,
 };
@@ -21,6 +22,7 @@ use tauri::{
 };
 
 pub mod auth;
+pub mod browser_session;
 pub mod delete_artifacts;
 pub mod engine;
 pub mod extractor;
@@ -153,6 +155,7 @@ pub fn run() {
             fetch_metadata,
             install_browser_integration,
             update_tool_binary,
+            open_browser_install_page,
             open_browser_extensions_page,
             open_extension_setup_link,
             open_folder,
