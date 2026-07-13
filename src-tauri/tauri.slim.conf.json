@@ -36,6 +36,9 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
+      },
+      "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     },
     "icon": [

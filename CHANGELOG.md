@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.2 - 2026-07-14
+
+Windows installer reliability patch.
+
+- Stopped browser-held native messaging host processes before Windows upgrades replace the installed helper executable.
+- Prevented the NSIS Abort/Retry/Ignore file-write prompt during normal upgrades while allowing browsers to reconnect the helper on their next extension request.
+- Applied the silent pre-install hook consistently to default, slim, and full Windows bundles.
+
 ## 0.2.1 - 2026-07-13
 
 Official Chrome Web Store integration bug-fix release.
