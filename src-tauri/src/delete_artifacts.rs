@@ -33,8 +33,12 @@ mod tests {
         let candidates = candidate_artifact_paths(target, true);
 
         assert_eq!(candidates[0], target);
-        assert!(candidates.iter().any(|path| path.ends_with("movie.vdl-temp-video")));
-        assert!(candidates.iter().any(|path| path.ends_with("movie.vdl-temp-audio")));
+        assert!(candidates
+            .iter()
+            .any(|path| path.ends_with("movie.vdl-temp-video")));
+        assert!(candidates
+            .iter()
+            .any(|path| path.ends_with("movie.vdl-temp-audio")));
     }
 
     #[test]

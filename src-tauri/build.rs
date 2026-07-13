@@ -24,7 +24,10 @@ fn ensure_dev_native_host_resource() {
     };
     let cargo_target_dir = resolve_cargo_target_dir(&manifest_dir);
 
-    let release_host = manifest_dir.join("target").join("release").join("vdl_native_host.exe");
+    let release_host = manifest_dir
+        .join("target")
+        .join("release")
+        .join("vdl_native_host.exe");
     if release_host.exists() {
         return;
     }

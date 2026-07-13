@@ -34,7 +34,10 @@ pub fn merge_request_headers(
     }
 
     if !has_header(&merged, "Cookie") {
-        if let Some(cookie_header) = cookie_header.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(cookie_header) = cookie_header
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             merged.insert("Cookie".to_string(), cookie_header.to_string());
         }
     }
@@ -61,7 +64,10 @@ pub fn add_cookie_to_headermap(headers: &mut HeaderMap, cookie_header: Option<&s
     if headers.contains_key(COOKIE) {
         return;
     }
-    if let Some(cookie_header) = cookie_header.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(cookie_header) = cookie_header
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         if let Ok(value) = HeaderValue::from_str(cookie_header) {
             headers.insert(COOKIE, value);
         }
@@ -135,7 +141,10 @@ mod tests {
     #[test]
     fn merge_request_headers_adds_defaults_and_cookie() {
         let mut headers = HashMap::new();
-        headers.insert("Referer".to_string(), "https://media.example.com/watch/alpha".to_string());
+        headers.insert(
+            "Referer".to_string(),
+            "https://media.example.com/watch/alpha".to_string(),
+        );
 
         let merged = merge_request_headers(Some(&headers), Some("sid=abc"));
 
@@ -163,13 +172,19 @@ mod tests {
     #[test]
     fn runtime_headermap_adds_user_agent_origin_and_cookie() {
         let mut headers = HashMap::new();
-        headers.insert("Referer".to_string(), "https://cdn.example.com/video".to_string());
+        headers.insert(
+            "Referer".to_string(),
+            "https://cdn.example.com/video".to_string(),
+        );
 
         let mut map = to_headermap(Some(&headers));
         add_cookie_to_headermap(&mut map, Some("sid=abc"));
         ensure_default_runtime_headers(&mut map);
 
-        assert_eq!(map.get(COOKIE).and_then(|value| value.to_str().ok()), Some("sid=abc"));
+        assert_eq!(
+            map.get(COOKIE).and_then(|value| value.to_str().ok()),
+            Some("sid=abc")
+        );
         assert_eq!(
             map.get(ORIGIN).and_then(|value| value.to_str().ok()),
             Some("https://cdn.example.com")
@@ -187,8 +202,14 @@ mod tests {
     #[test]
     fn ffmpeg_header_blob_redacts_internal_marker_and_keeps_origin() {
         let mut headers = HashMap::new();
-        headers.insert("Referer".to_string(), "https://media.example.com/watch/alpha".to_string());
-        headers.insert("X-VDL-Raw-Media-Url".to_string(), "https://raw.example.com/v.m3u8".to_string());
+        headers.insert(
+            "Referer".to_string(),
+            "https://media.example.com/watch/alpha".to_string(),
+        );
+        headers.insert(
+            "X-VDL-Raw-Media-Url".to_string(),
+            "https://raw.example.com/v.m3u8".to_string(),
+        );
 
         let blob = build_ffmpeg_header_blob(Some(&headers)).expect("header blob");
 

@@ -23,38 +23,61 @@ pub struct SessionRefreshResponse {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
-fn request_dir(root: &Path) -> PathBuf { root.join("browser_session_refresh_requests") }
-fn response_dir(root: &Path) -> PathBuf { root.join("browser_session_refresh_responses") }
+fn request_dir(root: &Path) -> PathBuf {
+    root.join("browser_session_refresh_requests")
+}
+fn response_dir(root: &Path) -> PathBuf {
+    root.join("browser_session_refresh_responses")
+}
 
 fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| "mailbox path has no parent".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "mailbox path has no parent".to_string())?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(&temp, serde_json::to_vec(value).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    fs::write(&temp, serde_json::to_vec(value).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
     fs::rename(&temp, path).map_err(|e| e.to_string())
 }
 
 pub fn take_pending_refresh_requests(root: &Path) -> Result<Vec<SessionRefreshRequest>, String> {
     let dir = request_dir(root);
-    if !dir.exists() { return Ok(Vec::new()); }
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
     let mut requests = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
+        if path.extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
         let raw = fs::read(&path).map_err(|e| e.to_string())?;
-        let request: SessionRefreshRequest = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+        let request: SessionRefreshRequest =
+            serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
         let _ = fs::remove_file(&path);
-        if now_ms().saturating_sub(request.created_at_ms) <= 2 * 60_000 { requests.push(request); }
+        if now_ms().saturating_sub(request.created_at_ms) <= 2 * 60_000 {
+            requests.push(request);
+        }
     }
     requests.sort_by_key(|request| request.created_at_ms);
     Ok(requests)
 }
 
-pub fn write_refresh_response(root: &Path, response: &SessionRefreshResponse) -> Result<(), String> {
-    atomic_json_write(&response_dir(root).join(format!("{}.json", response.refresh_id)), response)
+pub fn write_refresh_response(
+    root: &Path,
+    response: &SessionRefreshResponse,
+) -> Result<(), String> {
+    atomic_json_write(
+        &response_dir(root).join(format!("{}.json", response.refresh_id)),
+        response,
+    )
 }
 
 pub async fn request_session_refresh(
@@ -62,7 +85,8 @@ pub async fn request_session_refresh(
     url: &str,
     network_request_id: &str,
 ) -> Result<SessionRefreshResponse, String> {
-    request_session_refresh_with_timeout(root, url, network_request_id, Duration::from_secs(70)).await
+    request_session_refresh_with_timeout(root, url, network_request_id, Duration::from_secs(70))
+        .await
 }
 
 pub async fn request_session_refresh_with_timeout(
@@ -78,7 +102,10 @@ pub async fn request_session_refresh_with_timeout(
         network_request_id: network_request_id.to_string(),
         created_at_ms: now_ms(),
     };
-    atomic_json_write(&request_dir(root).join(format!("{refresh_id}.json")), &request)?;
+    atomic_json_write(
+        &request_dir(root).join(format!("{refresh_id}.json")),
+        &request,
+    )?;
     let response_path = response_dir(root).join(format!("{refresh_id}.json"));
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
@@ -94,7 +121,10 @@ pub async fn request_session_refresh_with_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::{request_session_refresh_with_timeout, take_pending_refresh_requests, write_refresh_response, SessionRefreshResponse};
+    use super::{
+        request_session_refresh_with_timeout, take_pending_refresh_requests,
+        write_refresh_response, SessionRefreshResponse,
+    };
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -108,21 +138,32 @@ mod tests {
                 "https://cdn.test/file",
                 "network-1",
                 Duration::from_secs(2),
-            ).await.unwrap()
+            )
+            .await
+            .unwrap()
         });
         let requests = loop {
             let requests = take_pending_refresh_requests(&root).unwrap();
-            if !requests.is_empty() { break requests; }
+            if !requests.is_empty() {
+                break requests;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert_eq!(requests[0].network_request_id, "network-1");
-        write_refresh_response(&root, &SessionRefreshResponse {
-            refresh_id: requests[0].refresh_id.clone(),
-            headers: HashMap::from([("Cookie".to_string(), "sid=fresh".to_string())]),
-            captured_at_ms: 1,
-        }).unwrap();
+        write_refresh_response(
+            &root,
+            &SessionRefreshResponse {
+                refresh_id: requests[0].refresh_id.clone(),
+                headers: HashMap::from([("Cookie".to_string(), "sid=fresh".to_string())]),
+                captured_at_ms: 1,
+            },
+        )
+        .unwrap();
         let response = waiter.await.unwrap();
-        assert_eq!(response.headers.get("Cookie").map(String::as_str), Some("sid=fresh"));
+        assert_eq!(
+            response.headers.get("Cookie").map(String::as_str),
+            Some("sid=fresh")
+        );
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

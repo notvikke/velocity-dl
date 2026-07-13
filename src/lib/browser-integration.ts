@@ -12,6 +12,78 @@ export interface BrowserIntegrationProfile {
   setup_hint: string;
 }
 
+export interface ExtensionIdentityStatus {
+  kind: "chrome_web_store" | "local_unpacked" | "unsupported";
+  supported: boolean;
+  production: boolean;
+  recommended: boolean;
+}
+
+export interface BrowserConnectionInput {
+  runtimeId?: string;
+  identity?: ExtensionIdentityStatus;
+  nativeHostAvailable: boolean;
+  anyBrowserAvailable: boolean;
+  anyManifestInstalled: boolean;
+}
+
+export function browserConnectionPresentation(input: BrowserConnectionInput) {
+  if (input.runtimeId && input.identity?.kind === "chrome_web_store" && input.identity.supported) {
+    return {
+      title: "Connected with the official extension",
+      description: "VelocityDL is ready to receive downloads from your browser.",
+      tone: "success" as const,
+      extensionModeLabel: "Official Web Store",
+    };
+  }
+  if (input.runtimeId && input.identity?.kind === "local_unpacked" && input.identity.supported) {
+    return {
+      title: "Connected via local extension",
+      description: "Your locally loaded extension is connected and ready to use.",
+      tone: "success" as const,
+      extensionModeLabel: "Local extension",
+    };
+  }
+  if (input.runtimeId) {
+    return {
+      title: "Extension ID mismatch",
+      description: "The connected extension is not the official Web Store build or an unpacked ID configured in the native bridge.",
+      tone: "warning" as const,
+      extensionModeLabel: "Unknown",
+    };
+  }
+  if (!input.nativeHostAvailable) {
+    return {
+      title: "Native host unavailable",
+      description: "This build cannot find the desktop bridge required by the browser extension.",
+      tone: "warning" as const,
+      extensionModeLabel: "Not detected",
+    };
+  }
+  if (!input.anyBrowserAvailable) {
+    return {
+      title: "Action required",
+      description: "Install a supported Chromium browser to continue setup.",
+      tone: "warning" as const,
+      extensionModeLabel: "Not detected",
+    };
+  }
+  if (!input.anyManifestInstalled) {
+    return {
+      title: "Browser setup incomplete",
+      description: "Install or repair the browser bridge, then open the extension once.",
+      tone: "warning" as const,
+      extensionModeLabel: "Not detected",
+    };
+  }
+  return {
+    title: "Waiting for extension connection",
+    description: "Open the extension from your browser toolbar to complete setup.",
+    tone: "neutral" as const,
+    extensionModeLabel: "Not detected",
+  };
+}
+
 function normalizeBrowserName(value?: string) {
   return (value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
 }

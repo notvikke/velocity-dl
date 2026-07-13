@@ -4,12 +4,11 @@ use crate::extractor::native_bridge::{
     start_app_presence, start_native_inbox_polling, ExtensionHealthState, ExternalCaptureQueueState,
 };
 use crate::ipc::commands::{
-    ack_external_capture_request, add_download, fetch_metadata, get_app_diagnostics,
-    delete_download_artifacts,
-    get_browser_integration_status, get_extension_health, get_settings, get_tooling_status,
-    install_browser_integration, open_browser_extensions_page, open_browser_install_page,
-    open_extension_setup_link, open_folder,
-    pause_download, reveal_main_window, save_settings, set_external_capture_listener_ready, start_sniffing,
+    ack_external_capture_request, add_download, delete_download_artifacts, fetch_metadata,
+    get_app_diagnostics, get_browser_integration_status, get_extension_health, get_settings,
+    get_tooling_status, install_browser_integration, open_browser_extensions_page,
+    open_browser_install_page, open_extension_setup_link, open_folder, pause_download,
+    reveal_main_window, save_settings, set_external_capture_listener_ready, start_sniffing,
     update_tool_binary,
 };
 use std::io::{Read, Write};
@@ -20,36 +19,59 @@ use tauri::{
     tray::TrayIconBuilder,
     Manager,
 };
+use window_activation::{reveal_main_window as reveal_main_window_now, NewDownloadRevealState};
 
 pub mod auth;
 pub mod browser_session;
 pub mod delete_artifacts;
 pub mod engine;
+pub mod extension_identity;
 pub mod extractor;
 pub mod ipc;
 pub mod pathing;
 pub mod protocols;
 pub mod request_context;
+pub mod window_activation;
+pub mod window_activation_policy;
 
 struct SingleInstanceGuard {
     _listener: TcpListener,
 }
 
-fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+const RELEASE_SINGLE_INSTANCE_ADDRESS: &str = "127.0.0.1:43187";
+const DEVELOPMENT_SINGLE_INSTANCE_ADDRESS: &str = "127.0.0.1:43188";
+
+fn single_instance_address_for(is_development: bool) -> &'static str {
+    if is_development {
+        DEVELOPMENT_SINGLE_INSTANCE_ADDRESS
+    } else {
+        RELEASE_SINGLE_INSTANCE_ADDRESS
+    }
+}
+
+fn single_instance_address() -> &'static str {
+    single_instance_address_for(cfg!(debug_assertions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_instance_address_for;
+
+    #[test]
+    fn development_and_release_builds_use_separate_single_instance_addresses() {
+        assert_eq!(single_instance_address_for(true), "127.0.0.1:43188");
+        assert_eq!(single_instance_address_for(false), "127.0.0.1:43187");
     }
 }
 
 fn acquire_single_instance_guard() -> Result<SingleInstanceGuard, std::io::Error> {
-    match TcpListener::bind("127.0.0.1:43187") {
+    let address = single_instance_address();
+    match TcpListener::bind(address) {
         Ok(listener) => Ok(SingleInstanceGuard {
             _listener: listener,
         }),
         Err(bind_err) => {
-            if let Ok(mut stream) = TcpStream::connect("127.0.0.1:43187") {
+            if let Ok(mut stream) = TcpStream::connect(address) {
                 let _ = stream.write_all(b"show");
             }
             Err(bind_err)
@@ -64,6 +86,7 @@ pub fn run() {
         .manage(auth::store::AuthManager::new())
         .manage(ExtensionHealthState::default())
         .manage(ExternalCaptureQueueState::default())
+        .manage(NewDownloadRevealState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -84,7 +107,7 @@ pub fn run() {
                         };
                         let mut buf = [0_u8; 16];
                         let _ = stream.read(&mut buf);
-                        show_main_window(&app_handle);
+                        let _ = reveal_main_window_now(&app_handle, None);
                     }
                 });
             }
@@ -121,7 +144,7 @@ pub fn run() {
                         app.exit(0);
                     }
                     "show" => {
-                        show_main_window(app);
+                        let _ = reveal_main_window_now(app, None);
                     }
                     _ => {}
                 })

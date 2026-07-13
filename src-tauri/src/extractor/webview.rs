@@ -1,5 +1,5 @@
 ﻿use base64::{engine::general_purpose, Engine as _};
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
@@ -16,6 +16,32 @@ pub struct SnifferCapture {
 struct SnifferClosedEvent {
     window_id: String,
     captured: bool,
+}
+
+fn decode_capture_navigation(url: &tauri::Url) -> Result<Option<SnifferCapture>, String> {
+    if url.scheme() != "vdl-detect" {
+        return Ok(None);
+    }
+
+    let encoded = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "d").then(|| value.into_owned()))
+        .ok_or_else(|| "Deep Sniff submission did not include a media payload.".to_string())?;
+    let decoded_bytes = general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
+        .or_else(|_| general_purpose::STANDARD.decode(encoded.as_bytes()))
+        .map_err(|_| "Deep Sniff submission payload could not be decoded.".to_string())?;
+    let mut capture: SnifferCapture = serde_json::from_slice(&decoded_bytes)
+        .map_err(|_| "Deep Sniff submission payload was malformed.".to_string())?;
+
+    capture.url = capture.url.trim().to_string();
+    let media_url = tauri::Url::parse(&capture.url)
+        .map_err(|_| "Deep Sniff could not resolve a valid media URL.".to_string())?;
+    if !matches!(media_url.scheme(), "http" | "https") {
+        return Err("Deep Sniff can only submit HTTP or HTTPS media URLs.".to_string());
+    }
+
+    Ok(Some(capture))
 }
 
 pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri::Result<()> {
@@ -42,47 +68,64 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
     .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
     .visible(true)
     .on_navigation(move |url| {
-        let url_str = url.as_str();
-        if url_str.starts_with("vdl-detect://") {
-            info!("Side-channel signal detected!");
-
-            let encoded = url
-                .query_pairs()
-                .find_map(|(k, v)| if k == "d" { Some(v.into_owned()) } else { None });
-
-            if let Some(encoded) = encoded {
-                let decoded_url = urlencoding::decode(&encoded)
-                    .unwrap_or(std::borrow::Cow::Borrowed(encoded.as_str()));
-
-                let decoded_bytes = general_purpose::URL_SAFE_NO_PAD
-                    .decode(decoded_url.as_ref())
-                    .or_else(|_| general_purpose::STANDARD.decode(decoded_url.as_ref()));
-
-                if let Ok(decoded_bytes) = decoded_bytes {
-                    if let Ok(json_str) = String::from_utf8(decoded_bytes) {
-                        if let Ok(capture) = serde_json::from_str::<SnifferCapture>(&json_str) {
-                            info!("Successfully captured media via side-channel: {}", capture.url);
-                            navigation_captured_flag
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                            let _ = sniffer_handle.emit("media_detected", capture);
-                            if let Some(window) = sniffer_handle.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                            if let Some(sniffer_window) = sniffer_handle.get_webview_window(&nav_window_id) {
-                                let _ = sniffer_window.close();
-                            }
-                        } else {
-                            error!("Failed to parse sniffer JSON: {}", json_str);
-                        }
-                    }
-                } else {
-                    error!("Failed to decode base64 from side-channel: {}", decoded_url);
+        let capture = match decode_capture_navigation(url) {
+            Ok(None) => return true,
+            Ok(Some(capture)) => capture,
+            Err(message) => {
+                error!("[Deep Sniff] Rejected capture handoff: {message}");
+                let _ = sniffer_handle.emit("sniffer_error", message);
+                if let Some(window) = sniffer_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
+                return false;
             }
+        };
+
+        if navigation_captured_flag.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            info!("[Deep Sniff] Ignored duplicate capture handoff");
             return false;
         }
-        true
+
+        info!("[Deep Sniff] Accepted capture handoff");
+        let dispatch_handle = sniffer_handle.clone();
+        let dispatch_window_id = nav_window_id.clone();
+        let dispatch_captured_flag = navigation_captured_flag.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(auth_manager) =
+                dispatch_handle.try_state::<crate::auth::store::AuthManager>()
+            {
+                match auth_manager.load_webview_cookies(&dispatch_handle).await {
+                    Ok(()) => info!("[Deep Sniff] Refreshed WebView2 cookies before handoff"),
+                    Err(error) => warn!(
+                        "[Deep Sniff] Could not refresh WebView2 cookies before handoff: {error}"
+                    ),
+                }
+            }
+
+            if let Err(error) = dispatch_handle.emit("media_detected", capture) {
+                error!("[Deep Sniff] Failed to emit media_detected: {error}");
+                dispatch_captured_flag.store(false, std::sync::atomic::Ordering::Release);
+                let _ = dispatch_handle.emit(
+                    "sniffer_error",
+                    "Deep Sniff resolved the media URL but could not submit it to VelocityDL. Please try again.",
+                );
+                if let Some(window) = dispatch_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                return;
+            }
+
+            info!("[Deep Sniff] Delivered capture to the main download flow");
+            if let Some(sniffer_window) =
+                dispatch_handle.get_webview_window(&dispatch_window_id)
+            {
+                let _ = sniffer_window.close();
+            }
+        });
+
+        false
     })
     .initialization_script(
         r#"
@@ -119,6 +162,11 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
                     return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
                 };
 
+                const buildCaptureUrl = (url, headers = {}, contentType = null) => {
+                    const data = JSON.stringify({ url, headers, content_type: contentType });
+                    return "vdl-detect://capture?d=" + encodeURIComponent(toBase64Url(data));
+                };
+
                 const reportCapture = (url, headers = {}, contentType = null) => {
                     if (!url || typeof url !== 'string') return;
 
@@ -126,12 +174,8 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
                     if (_vdl_reported.has(key)) return;
                     _vdl_reported.add(key);
 
-                    console.log("[VDL] Media detected:", url);
-
                     try {
-                        const data = JSON.stringify({ url, headers, content_type: contentType });
-                        const encoded = toBase64Url(data);
-                        const reportUrl = "vdl-detect://capture?d=" + encodeURIComponent(encoded);
+                        const reportUrl = buildCaptureUrl(url, headers, contentType);
 
                         let iframe = document.getElementById('vdl-sniffer-bridge');
                         if (!iframe) {
@@ -143,6 +187,18 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
                         iframe.src = reportUrl;
                     } catch (e) {
                         console.error("[VDL] Failed to report media:", e);
+                    }
+                };
+
+                const submitCapture = (url, headers = {}, contentType = null) => {
+                    if (!url || typeof url !== 'string') return false;
+                    try {
+                        console.log("[VDL] Deep Sniff button submitting media");
+                        window.location.href = buildCaptureUrl(url, headers, contentType);
+                        return true;
+                    } catch (e) {
+                        console.error("[VDL] Failed to submit Deep Sniff capture:", e);
+                        return false;
                     }
                 };
 
@@ -198,11 +254,42 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
                     }
                 };
 
+                const normalizeHttpMediaUrl = (value) => {
+                    if (!value || typeof value !== 'string' || value.startsWith('blob:')) return null;
+                    try {
+                        const resolved = new URL(value, location.href);
+                        return resolved.protocol === 'http:' || resolved.protocol === 'https:'
+                            ? resolved.href
+                            : null;
+                    } catch (e) {
+                        return null;
+                    }
+                };
+
                 const resolveMediaUrl = (mediaEl) => {
-                    const src = mediaEl.currentSrc || mediaEl.src || mediaEl.getAttribute('src');
-                    if (src && !src.startsWith('blob:')) return src;
-                    if (_vdl_last_mpd) return _vdl_last_mpd;
-                    if (_vdl_last_m3u8) return _vdl_last_m3u8;
+                    const candidates = [
+                        mediaEl.currentSrc,
+                        mediaEl.src,
+                        mediaEl.getAttribute('src'),
+                        mediaEl.getAttribute('data-src'),
+                    ];
+                    for (const candidate of candidates) {
+                        const resolved = normalizeHttpMediaUrl(candidate);
+                        if (resolved) return resolved;
+                    }
+
+                    const sourceEl = mediaEl.querySelector('source[src], source[data-src]');
+                    if (sourceEl) {
+                        const resolvedSource = normalizeHttpMediaUrl(
+                            sourceEl.src || sourceEl.getAttribute('src') || sourceEl.getAttribute('data-src')
+                        );
+                        if (resolvedSource) return resolvedSource;
+                    }
+
+                    const mpd = normalizeHttpMediaUrl(_vdl_last_mpd);
+                    if (mpd) return mpd;
+                    const m3u8 = normalizeHttpMediaUrl(_vdl_last_m3u8);
+                    if (m3u8) return m3u8;
                     return null;
                 };
 
@@ -248,12 +335,10 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
                                 Origin: location.origin,
                                 'User-Agent': navigator.userAgent,
                             };
-                            smartReport(targetUrl, clickHeaders, null);
-                            button.textContent = 'Captured';
-                            setTimeout(() => { button.textContent = 'Download with VelocityDL'; }, 1400);
+                            const submitted = submitCapture(targetUrl, clickHeaders, null);
+                            button.textContent = submitted ? 'Submitting…' : 'Capture failed';
                         } else {
                             button.textContent = 'Play media first';
-                            setTimeout(() => { button.textContent = 'Download with VelocityDL'; }, 1400);
                         }
                     });
 
@@ -400,18 +485,80 @@ pub async fn start_sniffer<R: Runtime>(app: AppHandle<R>, url: String) -> tauri:
                 captured: was_captured,
             };
             let _ = h.emit("sniffer_closed", close_event);
-            tauri::async_runtime::spawn(async move {
-                info!("Sniffer window closing. Attempting to refresh cookies from SQLite...");
-                if let Some(auth_manager) = h.try_state::<crate::auth::store::AuthManager>() {
-                    if let Err(e) = auth_manager.load_webview_cookies(&h).await {
-                        error!("Failed to load webview cookies: {}", e);
-                    } else {
-                        info!("Successfully refreshed cookies from WebView2 SQLite DB.");
+            if !was_captured {
+                tauri::async_runtime::spawn(async move {
+                    info!("Sniffer window closing. Attempting to refresh cookies from SQLite...");
+                    if let Some(auth_manager) = h.try_state::<crate::auth::store::AuthManager>() {
+                        if let Err(e) = auth_manager.load_webview_cookies(&h).await {
+                            error!("Failed to load webview cookies: {}", e);
+                        } else {
+                            info!("Successfully refreshed cookies from WebView2 SQLite DB.");
+                        }
                     }
-                }
-            });
+                });
+            }
         }
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_capture_navigation;
+    use base64::{engine::general_purpose, Engine as _};
+    use serde_json::json;
+
+    fn capture_navigation(payload: serde_json::Value) -> tauri::Url {
+        let encoded = general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        tauri::Url::parse(&format!("vdl-detect://capture?d={encoded}"))
+            .expect("valid capture navigation")
+    }
+
+    #[test]
+    fn decodes_capture_navigation_with_request_context() {
+        let navigation = capture_navigation(json!({
+            "url": "https://cdn.example.test/vídeo.mp4?token=abc",
+            "headers": {
+                "Referer": "https://media.example.test/watch",
+                "User-Agent": "VelocityDL Test"
+            },
+            "content_type": "video/mp4"
+        }));
+
+        let capture = decode_capture_navigation(&navigation)
+            .expect("capture should decode")
+            .expect("capture navigation should produce a payload");
+
+        assert_eq!(capture.url, "https://cdn.example.test/vídeo.mp4?token=abc");
+        assert_eq!(
+            capture.headers.get("Referer").map(String::as_str),
+            Some("https://media.example.test/watch")
+        );
+        assert_eq!(capture.content_type.as_deref(), Some("video/mp4"));
+    }
+
+    #[test]
+    fn ignores_normal_page_navigation() {
+        let navigation = tauri::Url::parse("https://media.example.test/watch").unwrap();
+        assert!(decode_capture_navigation(&navigation).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_non_http_media_urls() {
+        for media_url in [
+            "blob:https://media.example.test/id",
+            "file:///C:/private/video.mp4",
+            "javascript:alert(1)",
+        ] {
+            let navigation = capture_navigation(json!({
+                "url": media_url,
+                "headers": {},
+                "content_type": null
+            }));
+            let error = decode_capture_navigation(&navigation)
+                .expect_err("non-HTTP capture must be rejected");
+            assert!(error.contains("HTTP"), "unexpected error: {error}");
+        }
+    }
 }

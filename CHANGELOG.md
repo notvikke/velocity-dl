@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.1 - 2026-07-13
+
+Official Chrome Web Store integration bug-fix release.
+
+- Fixed Browser Setup Assistant identity validation so the official Chrome Web Store extension remains supported when manifests are missing, stale, or accompanied by an optional local unpacked ID.
+- Bound native-host heartbeat identity to Chromium's caller origin and preserved production access alongside advanced local-extension setup.
+- Hardened browser-session, webview, download-reveal, deep-sniff, and native-host flows covered by the new regression checks.
+- The official Chrome Web Store extension remains unchanged; no Web Store resubmission is required for this desktop release.
+
 ## 0.2.0 - 2026-07-13
 
 Browser compatibility and download reliability release.
@@ -12,6 +21,8 @@ Browser compatibility and download reliability release.
 - Hardened direct-download probing and ranged transfers against ignored range requests and misleading content lengths.
 - Kept failed downloads visible in the active queue and improved browser integration status guidance.
 - Updated the VelocityDL Bridge extension package to version 0.1.2.
+- Fixed the Browser Setup Assistant falsely rejecting the official Web Store extension when a browser manifest was missing, stale, or configured for an unpacked ID; native manifests now retain production access alongside the optional local identity.
+- Bound heartbeat identity to Chromium's native-messaging caller origin instead of trusting the extension's claimed runtime ID alone.
 
 ## 0.1.0-beta.3 - 2026-07-11
 

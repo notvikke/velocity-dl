@@ -58,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File .\native-messaging\install-native-host.
   -HostExePath "D:\Dev 2026\Tools\VelocityDL\src-tauri\target\debug\vdl_native_host.exe"
 ```
 
-If `-ChromeExtensionId` is omitted, the script defaults to the published web-store ID `alnagakehjhbfkdianlkmcncefldpmhm`. If `-EdgeExtensionId` is also omitted, it defaults to the same stable ID so Edge gets registered too.
+The published Web Store ID `alnagakehjhbfkdianlkmcncefldpmhm` is always registered first. `-ChromeExtensionId` and `-EdgeExtensionId` are optional advanced values for an unpacked extension; when supplied, the validated local ID is added without replacing production access.
 
 This writes manifests to:
 - `%APPDATA%\com.velocitydl.desktop\native-messaging\...`
@@ -69,7 +69,7 @@ And registry keys:
 - `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.velocitydl.native_host`
 - `HKCU\Software\imput\Helium\NativeMessagingHosts\com.velocitydl.native_host`
 - `HKCU\Software\imput\Helium\NativeMessagingHosts` value `com.velocitydl.native_host`
-- `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host` (if Edge id provided)
+- `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host`
 - `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.velocitydl.native_host`
 - Chrome-compatible fallback registration used by Vivaldi, Opera, and Opera GX
 
@@ -90,6 +90,16 @@ To load the fallback:
 3. Load unpacked: select `%LOCALAPPDATA%\VelocityDL\chromium-extension`
 4. Copy the runtime extension ID shown by the browser
 5. In VelocityDL, use the setup assistant's manual fallback section to apply that ID
+
+The setup assistant classifies a connected identity in the trusted backend:
+
+- `Chrome Web Store`: the production ID above; supported, production, and recommended.
+- `Local/unpacked`: a different valid ID explicitly written to the native-host manifest through the advanced flow; supported for development, but never labelled official or recommended.
+- `Unsupported`: any ID that is neither production nor present in the installed native-host manifests; shown as a genuine mismatch.
+
+Chromium passes the caller extension origin to the native-host process. The host derives the runtime ID from that origin and rejects a heartbeat if its payload claims a different ID. The browser's exact `allowed_origins` check remains in force; there are no wildcards and the renderer cannot mark an extension official.
+
+The RSA `key` in `chromium-extension/manifest.json` deterministically produces the production ID `alnagakehjhbfkdianlkmcncefldpmhm`. This identity fix does not change that key, the Web Store listing, or extension package contents, so it requires a desktop/native-host release but no Chrome Web Store resubmission.
 
 ## Use in app
 In VelocityDL Settings:

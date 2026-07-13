@@ -1,7 +1,7 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "node node_modules/vite/bin/vite.js",
@@ -10,6 +10,7 @@
     "bundle:windows:slim": "scripts\\bundle-windows-slim.cmd",
     "bundle:windows:full": "scripts\\bundle-windows-full.cmd",
     "handoff:regression": "node scripts/browser-handoff-regression.mjs",
+    "deep-sniff:regression": "node scripts/deep-sniff-button-regression.mjs",
     "strategy:probe": "cmd /c \"set \\\"CARGO_TARGET_DIR=src-tauri/target-strategy\\\" && C:\\Users\\vikas\\.cargo\\bin\\cargo.exe run --quiet --manifest-path src-tauri/Cargo.toml --bin strategy_probe --\"",
     "strategy:regression": "cmd /c \"set \\\"CARGO_TARGET_DIR=src-tauri/target-strategy\\\" && C:\\Users\\vikas\\.cargo\\bin\\cargo.exe run --quiet --manifest-path src-tauri/Cargo.toml --bin strategy_probe -- --input scripts/strategy-targets.regression.csv\"",
     "strategy:test": "cmd /c \"set \\\"CARGO_TARGET_DIR=src-tauri/target-strategy\\\" && C:\\Users\\vikas\\.cargo\\bin\\cargo.exe test --manifest-path src-tauri/Cargo.toml strategy_classification_regression_examples\"",

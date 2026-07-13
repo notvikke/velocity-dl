@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::cell::RefCell;
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+use velocitydl_lib::extension_identity::{extension_id_from_origin, normalize_extension_id};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeMessage {
@@ -121,6 +122,30 @@ fn default_true() -> bool {
     true
 }
 
+fn caller_extension_id_from_args(args: impl IntoIterator<Item = String>) -> Result<String, String> {
+    args.into_iter()
+        .find_map(|argument| extension_id_from_origin(&argument))
+        .ok_or_else(|| "Native messaging caller origin is missing or invalid".to_string())
+}
+
+fn bind_trusted_heartbeat_identity(
+    message: &mut NativeMessage,
+    caller_extension_id: &str,
+) -> Result<(), String> {
+    let trusted_id = normalize_extension_id(caller_extension_id)
+        .ok_or_else(|| "Native messaging caller extension ID is invalid".to_string())?;
+    let claimed_id = message
+        .runtime_id
+        .as_deref()
+        .and_then(normalize_extension_id)
+        .ok_or_else(|| "Heartbeat runtime extension ID is missing or invalid".to_string())?;
+    if claimed_id != trusted_id {
+        return Err("Heartbeat runtime extension ID does not match native caller".to_string());
+    }
+    message.runtime_id = Some(trusted_id);
+    Ok(())
+}
+
 fn app_config_dir() -> Result<PathBuf, String> {
     let appdata = env::var("APPDATA").map_err(|e| format!("APPDATA not set: {}", e))?;
     Ok(PathBuf::from(appdata).join("com.velocitydl.desktop"))
@@ -152,16 +177,23 @@ thread_local! {
     static CURRENT_TRANSPORT_ID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-fn serialize_json_response<T: Serialize>(resp: &T, transport_id: Option<&str>) -> Result<Vec<u8>, String> {
+fn serialize_json_response<T: Serialize>(
+    resp: &T,
+    transport_id: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let mut value = serde_json::to_value(resp).map_err(|e| e.to_string())?;
     if let (Some(id), Some(object)) = (transport_id, value.as_object_mut()) {
-        object.insert("transport_id".to_string(), serde_json::Value::String(id.to_string()));
+        object.insert(
+            "transport_id".to_string(),
+            serde_json::Value::String(id.to_string()),
+        );
     }
     serde_json::to_vec(&value).map_err(|e| e.to_string())
 }
 
 fn write_json_response<T: Serialize>(resp: &T) -> Result<(), String> {
-    let bytes = CURRENT_TRANSPORT_ID.with(|id| serialize_json_response(resp, id.borrow().as_deref()))?;
+    let bytes =
+        CURRENT_TRANSPORT_ID.with(|id| serialize_json_response(resp, id.borrow().as_deref()))?;
     let len = (bytes.len() as u32).to_le_bytes();
     let mut stdout = io::stdout();
     stdout.write_all(&len).map_err(|e| e.to_string())?;
@@ -178,7 +210,11 @@ fn validate_capture_message(message: &NativeMessage) -> Result<(), String> {
     {
         return Err("capture requires an http(s) url".to_string());
     }
-    let method = message.request_method.as_deref().unwrap_or("GET").to_ascii_uppercase();
+    let method = message
+        .request_method
+        .as_deref()
+        .unwrap_or("GET")
+        .to_ascii_uppercase();
     if method != "GET" && method != "POST" {
         return Err(format!("unsupported capture request method '{method}'"));
     }
@@ -187,13 +223,19 @@ fn validate_capture_message(message: &NativeMessage) -> Result<(), String> {
             return Err("capture request body is truncated or exceeds 512 KiB".to_string());
         }
         if body.encoding != "utf8" && body.encoding != "base64" {
-            return Err(format!("unsupported capture body encoding '{}'", body.encoding));
+            return Err(format!(
+                "unsupported capture body encoding '{}'",
+                body.encoding
+            ));
         }
         if body.data.is_none() {
             return Err("capture request body data is missing".to_string());
         }
     }
-    if method == "POST" && message.request_body.is_none() && message.request_body_unavailable != Some(true) {
+    if method == "POST"
+        && message.request_body.is_none()
+        && message.request_body_unavailable != Some(true)
+    {
         return Err("POST capture requires request body metadata".to_string());
     }
     Ok(())
@@ -202,10 +244,12 @@ fn validate_capture_message(message: &NativeMessage) -> Result<(), String> {
 fn load_settings_snapshot() -> AppSettingsSnapshot {
     let settings_path = match app_config_dir() {
         Ok(dir) => dir.join("settings.json"),
-        Err(_) => return AppSettingsSnapshot {
-            accept_browser_download_requests: true,
-            browser_takeover_all_downloads: true,
-        },
+        Err(_) => {
+            return AppSettingsSnapshot {
+                accept_browser_download_requests: true,
+                browser_takeover_all_downloads: true,
+            }
+        }
     };
 
     match fs::read_to_string(settings_path) {
@@ -228,7 +272,10 @@ fn capture_ack_path(config_dir: &PathBuf, request_id: &str) -> PathBuf {
     capture_ack_dir(config_dir).join(format!("{request_id}.json"))
 }
 
-fn wait_for_capture_ack(request_id: &str, timeout: Duration) -> Result<Option<CaptureAckPayload>, String> {
+fn wait_for_capture_ack(
+    request_id: &str,
+    timeout: Duration,
+) -> Result<Option<CaptureAckPayload>, String> {
     let config_dir = app_config_dir()?;
     fs::create_dir_all(capture_ack_dir(&config_dir)).map_err(|e| e.to_string())?;
     let ack_path = capture_ack_path(&config_dir, request_id);
@@ -236,8 +283,9 @@ fn wait_for_capture_ack(request_id: &str, timeout: Duration) -> Result<Option<Ca
 
     while Instant::now() < deadline {
         if ack_path.exists() {
-            let raw = fs::read_to_string(&ack_path)
-                .map_err(|e| format!("Failed to read capture ack '{}': {}", ack_path.display(), e))?;
+            let raw = fs::read_to_string(&ack_path).map_err(|e| {
+                format!("Failed to read capture ack '{}': {}", ack_path.display(), e)
+            })?;
             let parsed = serde_json::from_str::<CaptureAckPayload>(&raw)
                 .map_err(|e| format!("Invalid capture ack JSON '{}': {}", ack_path.display(), e))?;
             let _ = fs::remove_file(&ack_path);
@@ -284,8 +332,9 @@ fn append_to_inbox(msg: &NativeMessage) -> Result<(), String> {
 }
 
 fn main() -> Result<(), String> {
+    let caller_extension_id = caller_extension_id_from_args(env::args())?;
     loop {
-        let message = match read_native_message()? {
+        let mut message = match read_native_message()? {
             Some(m) => m,
             None => break,
         };
@@ -334,7 +383,8 @@ fn main() -> Result<(), String> {
 
         if message.action == "get_session_refresh_requests" {
             let config_dir = app_config_dir()?;
-            let requests = velocitydl_lib::browser_session::take_pending_refresh_requests(&config_dir)?;
+            let requests =
+                velocitydl_lib::browser_session::take_pending_refresh_requests(&config_dir)?;
             write_json_response(&serde_json::json!({
                 "ok": true,
                 "message": "session refresh requests",
@@ -344,8 +394,14 @@ fn main() -> Result<(), String> {
         }
 
         if message.action == "session_refresh_response" {
-            let refresh_id = message.refresh_id.clone().ok_or_else(|| "session_refresh_response requires refresh_id".to_string())?;
-            let headers = message.refresh_headers.clone().ok_or_else(|| "session_refresh_response requires refresh_headers".to_string())?;
+            let refresh_id = message
+                .refresh_id
+                .clone()
+                .ok_or_else(|| "session_refresh_response requires refresh_id".to_string())?;
+            let headers = message
+                .refresh_headers
+                .clone()
+                .ok_or_else(|| "session_refresh_response requires refresh_headers".to_string())?;
             velocitydl_lib::browser_session::write_refresh_response(
                 &app_config_dir()?,
                 &velocitydl_lib::browser_session::SessionRefreshResponse {
@@ -354,7 +410,9 @@ fn main() -> Result<(), String> {
                     captured_at_ms: message.sent_at_ms.unwrap_or(0),
                 },
             )?;
-            write_json_response(&serde_json::json!({ "ok": true, "message": "session refresh stored" }))?;
+            write_json_response(
+                &serde_json::json!({ "ok": true, "message": "session refresh stored" }),
+            )?;
             continue;
         }
 
@@ -429,9 +487,22 @@ fn main() -> Result<(), String> {
                     message: "VelocityDL app is not running".to_string(),
                     accept_browser_download_requests: None,
                     browser_takeover_all_downloads: None,
-                accepted: Some(false),
-                route_class: None,
-            })?;
+                    accepted: Some(false),
+                    route_class: None,
+                })?;
+                continue;
+            }
+            if let Err(validation_error) =
+                bind_trusted_heartbeat_identity(&mut message, &caller_extension_id)
+            {
+                write_json_response(&NativeResponse {
+                    ok: false,
+                    message: validation_error,
+                    accept_browser_download_requests: None,
+                    browser_takeover_all_downloads: None,
+                    accepted: Some(false),
+                    route_class: None,
+                })?;
                 continue;
             }
             append_to_inbox(&message)?;
@@ -460,7 +531,67 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{serialize_json_response, validate_capture_message, NativeMessage};
+    use super::{
+        bind_trusted_heartbeat_identity, caller_extension_id_from_args, serialize_json_response,
+        validate_capture_message, NativeMessage,
+    };
+    use velocitydl_lib::extension_identity::CHROME_WEB_STORE_EXTENSION_ID;
+
+    #[test]
+    fn caller_extension_id_comes_from_chromiums_origin_argument() {
+        let id = caller_extension_id_from_args([
+            "vdl_native_host.exe".to_string(),
+            format!("chrome-extension://{CHROME_WEB_STORE_EXTENSION_ID}/"),
+            "--parent-window=0".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(id, CHROME_WEB_STORE_EXTENSION_ID);
+    }
+
+    #[test]
+    fn caller_extension_id_rejects_missing_or_malformed_origins() {
+        assert!(caller_extension_id_from_args([
+            "vdl_native_host.exe".to_string(),
+            "--parent-window=0".to_string(),
+        ])
+        .is_err());
+        assert!(caller_extension_id_from_args([
+            "vdl_native_host.exe".to_string(),
+            "https://example.test/".to_string(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn caller_identity_replaces_a_matching_heartbeat_claim() {
+        let mut message: NativeMessage = serde_json::from_value(serde_json::json!({
+            "action": "heartbeat",
+            "runtime_id": CHROME_WEB_STORE_EXTENSION_ID.to_uppercase()
+        }))
+        .unwrap();
+
+        bind_trusted_heartbeat_identity(&mut message, CHROME_WEB_STORE_EXTENSION_ID).unwrap();
+
+        assert_eq!(
+            message.runtime_id.as_deref(),
+            Some(CHROME_WEB_STORE_EXTENSION_ID)
+        );
+    }
+
+    #[test]
+    fn caller_identity_rejects_a_different_heartbeat_claim() {
+        let mut message: NativeMessage = serde_json::from_value(serde_json::json!({
+            "action": "heartbeat",
+            "runtime_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }))
+        .unwrap();
+
+        let error = bind_trusted_heartbeat_identity(&mut message, CHROME_WEB_STORE_EXTENSION_ID)
+            .unwrap_err();
+
+        assert!(error.contains("does not match native caller"));
+    }
 
     #[test]
     fn capture_contract_deserializes_post_body_and_network_context() {
@@ -480,11 +611,18 @@ mod tests {
             "tab_id": 4,
             "frame_id": 2,
             "redirect_chain": ["https://example.test/start"]
-        })).unwrap();
+        }))
+        .unwrap();
 
         assert_eq!(message.transport_id.as_deref(), Some("transport-1"));
         assert_eq!(message.request_method.as_deref(), Some("POST"));
-        assert_eq!(message.request_body.as_ref().and_then(|body| body.data.as_deref()), Some("format=csv"));
+        assert_eq!(
+            message
+                .request_body
+                .as_ref()
+                .and_then(|body| body.data.as_deref()),
+            Some("format=csv")
+        );
         assert_eq!(message.network_request_id.as_deref(), Some("network-7"));
         assert_eq!(message.tab_id, Some(4));
         assert_eq!(message.frame_id, Some(2));
@@ -504,10 +642,15 @@ mod tests {
                 "byte_length": 600000,
                 "truncated": true
             }
-        })).unwrap();
-        assert!(validate_capture_message(&message).unwrap_err().contains("body"));
+        }))
+        .unwrap();
+        assert!(validate_capture_message(&message)
+            .unwrap_err()
+            .contains("body"));
         message.request_body.as_mut().unwrap().truncated = false;
-        assert!(validate_capture_message(&message).unwrap_err().contains("body"));
+        assert!(validate_capture_message(&message)
+            .unwrap_err()
+            .contains("body"));
     }
 
     #[test]
@@ -522,7 +665,8 @@ mod tests {
                 route_class: None,
             },
             Some("transport-9"),
-        ).unwrap();
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&value).unwrap();
         assert_eq!(parsed["transport_id"], "transport-9");
     }

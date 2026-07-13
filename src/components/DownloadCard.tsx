@@ -46,6 +46,7 @@ interface Props {
   onRefresh?: (id: string) => void;
   onDelete?: (id: string) => void;
   onOpenFolder?: (id: string) => void;
+  highlighted?: boolean;
 }
 
 interface Segment {
@@ -81,6 +82,7 @@ export const DownloadCard = memo(function DownloadCard({
   onRefresh,
   onDelete,
   onOpenFolder,
+  highlighted,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const mainHeaderCount = headers ? Object.keys(headers).length : 0;
@@ -108,8 +110,11 @@ export const DownloadCard = memo(function DownloadCard({
 
   return (
     <div
+      data-download-id={id}
       className={`bg-surface border p-3 rounded-md transition-all group relative overflow-hidden ${
-        status === "error"
+        highlighted
+          ? "border-accent shadow-[0_0_24px_rgba(63,140,255,0.28)]"
+          : status === "error"
           ? "border-error/40 shadow-[0_0_15px_rgba(255,76,76,0.1)]"
           : "border-border hover:border-accent/40"
       }`}

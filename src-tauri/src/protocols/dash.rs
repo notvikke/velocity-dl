@@ -192,10 +192,7 @@ pub async fn download_mpd(
                 tail.join(" | ")
             }
         };
-        return Err(anyhow!(
-            "FFmpeg DASH download failed: {}",
-            stderr_snapshot
-        ));
+        return Err(anyhow!("FFmpeg DASH download failed: {}", stderr_snapshot));
     }
 
     Ok(())

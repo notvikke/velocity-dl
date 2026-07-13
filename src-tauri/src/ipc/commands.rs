@@ -1,5 +1,9 @@
 use crate::engine::manager::DownloadManager;
 use crate::engine::settings::AppSettings;
+use crate::extension_identity::{
+    classify_extension_id, extension_id_from_origin, normalize_extension_id, ExtensionIdentity,
+    CHROME_WEB_STORE_EXTENSION_ID,
+};
 use crate::extractor::{
     binaries,
     native_bridge::{
@@ -84,6 +88,7 @@ pub struct BrowserIntegrationStatus {
     pub last_seen_runtime_id: Option<String>,
     pub last_seen_browser: Option<String>,
     pub last_heartbeat_at_ms: Option<u64>,
+    pub connected_extension: Option<ExtensionIdentity>,
     pub chrome_runtime_matches_manifest: bool,
     pub chromium_runtime_matches_manifest: bool,
     pub helium_runtime_matches_manifest: bool,
@@ -167,7 +172,6 @@ struct NativeBrowserTarget {
     setup_hint: &'static str,
 }
 
-const CHROME_WEB_STORE_EXTENSION_ID: &str = "alnagakehjhbfkdianlkmcncefldpmhm";
 const CHROME_WEB_STORE_INSTALL_URL: &str =
     "https://chromewebstore.google.com/detail/velocitydl-bridge/alnagakehjhbfkdianlkmcncefldpmhm";
 const FALLBACK_SETUP_URL: &str =
@@ -400,14 +404,8 @@ async fn auth_cookie_header<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
 }
 
 fn validate_extension_id(value: &str) -> Result<String, String> {
-    let trimmed = value.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return Err("Extension ID is required".to_string());
-    }
-    if trimmed.len() != 32 || !trimmed.chars().all(|ch| ('a'..='p').contains(&ch)) {
-        return Err("Extension ID must be a 32-character Chromium extension ID".to_string());
-    }
-    Ok(trimmed)
+    normalize_extension_id(value)
+        .ok_or_else(|| "Extension ID must be a 32-character Chromium extension ID".to_string())
 }
 
 #[cfg(windows)]
@@ -439,11 +437,9 @@ fn find_browser_executable(browser: &str) -> Option<PathBuf> {
                 .as_ref()
                 .map(|base| base.join("Microsoft\\Edge\\Application\\msedge.exe")),
         ],
-        "helium" => vec![
-            local_app_data
-                .as_ref()
-                .map(|base| base.join("imput\\Helium\\Application\\chrome.exe")),
-        ],
+        "helium" => vec![local_app_data
+            .as_ref()
+            .map(|base| base.join("imput\\Helium\\Application\\chrome.exe"))],
         "brave" => vec![
             local_app_data
                 .as_ref()
@@ -466,16 +462,12 @@ fn find_browser_executable(browser: &str) -> Option<PathBuf> {
                 .as_ref()
                 .map(|base| base.join("Vivaldi\\Application\\vivaldi.exe")),
         ],
-        "opera" => vec![
-            local_app_data
-                .as_ref()
-                .map(|base| base.join("Programs\\Opera\\opera.exe")),
-        ],
-        "opera_gx" => vec![
-            local_app_data
-                .as_ref()
-                .map(|base| base.join("Programs\\Opera GX\\opera.exe")),
-        ],
+        "opera" => vec![local_app_data
+            .as_ref()
+            .map(|base| base.join("Programs\\Opera\\opera.exe"))],
+        "opera_gx" => vec![local_app_data
+            .as_ref()
+            .map(|base| base.join("Programs\\Opera GX\\opera.exe"))],
         _ => Vec::new(),
     };
 
@@ -491,7 +483,9 @@ fn native_manifest_output_dir() -> Result<PathBuf, String> {
     let appdata = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "APPDATA is not available".to_string())?;
-    Ok(appdata.join("com.velocitydl.desktop").join("native-messaging"))
+    Ok(appdata
+        .join("com.velocitydl.desktop")
+        .join("native-messaging"))
 }
 
 fn native_host_install_dir() -> Result<PathBuf, String> {
@@ -512,7 +506,10 @@ fn should_copy_artifact(source: &Path, destination: &Path) -> bool {
     if source == destination {
         return false;
     }
-    match (std::fs::canonicalize(source), std::fs::canonicalize(destination)) {
+    match (
+        std::fs::canonicalize(source),
+        std::fs::canonicalize(destination),
+    ) {
         (Ok(source), Ok(destination)) => source != destination,
         _ => true,
     }
@@ -567,7 +564,10 @@ fn push_native_host_target_candidates(candidates: &mut Vec<PathBuf>, target_dir:
     );
 }
 
-fn resolve_bundled_resource<R: Runtime>(app: &AppHandle<R>, relative_path: &str) -> Option<PathBuf> {
+fn resolve_bundled_resource<R: Runtime>(
+    app: &AppHandle<R>,
+    relative_path: &str,
+) -> Option<PathBuf> {
     app.path()
         .resource_dir()
         .ok()
@@ -619,7 +619,12 @@ fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<Path
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("resources").join("native-host").join("vdl_native_host.exe"));
+            candidates.push(
+                parent
+                    .join("resources")
+                    .join("native-host")
+                    .join("vdl_native_host.exe"),
+            );
             candidates.push(parent.join("vdl_native_host.exe"));
             candidates.push(parent.join("native-host").join("vdl_native_host.exe"));
         }
@@ -629,7 +634,10 @@ fn resolve_native_host_executable<R: Runtime>(app: &AppHandle<R>) -> Option<Path
     }
     if let Ok(cwd) = std::env::current_dir() {
         push_native_host_target_candidates(&mut candidates, &cwd.join("target-devrun"));
-        push_native_host_target_candidates(&mut candidates, &cwd.join("src-tauri").join("target-devrun"));
+        push_native_host_target_candidates(
+            &mut candidates,
+            &cwd.join("src-tauri").join("target-devrun"),
+        );
         push_native_host_target_candidates(&mut candidates, &cwd.join("src-tauri").join("target"));
     }
     if let Ok(install_dir) = native_host_install_dir() {
@@ -684,25 +692,66 @@ fn registry_named_value(registry_key: &str, value_name: Option<&str>) -> Option<
     })
 }
 
-fn manifest_extension_id(manifest_path: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(manifest_path).ok()?;
+fn manifest_extension_ids(manifest_path: &Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(manifest_path) else {
+        return Vec::new();
+    };
     let normalized = raw.trim_start_matches('\u{feff}');
-    let parsed = serde_json::from_str::<serde_json::Value>(normalized).ok()?;
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(normalized) else {
+        return Vec::new();
+    };
     parsed
         .get("allowed_origins")
         .and_then(|v| v.as_array())
-        .and_then(|origins| origins.first())
-        .and_then(|origin| origin.as_str())
-        .and_then(|origin| {
-            let prefix = "chrome-extension://";
-            origin
-                .strip_prefix(prefix)
-                .and_then(|rest| rest.strip_suffix('/'))
-                .map(|s| s.to_string())
-        })
+        .into_iter()
+        .flatten()
+        .filter_map(|origin| origin.as_str())
+        .filter_map(extension_id_from_origin)
+        .collect()
 }
 
-fn browser_matches_manifest_kind(browser: Option<&str>, manifest_kind: BrowserManifestKind) -> bool {
+fn manifest_extension_id(manifest_path: &Path) -> Option<String> {
+    manifest_extension_ids(manifest_path).into_iter().last()
+}
+
+fn manifest_allows_extension_id(manifest_path: &Path, runtime_id: Option<&str>) -> bool {
+    let Some(runtime_id) = runtime_id.and_then(normalize_extension_id) else {
+        return false;
+    };
+    manifest_extension_ids(manifest_path)
+        .into_iter()
+        .any(|candidate| candidate == runtime_id)
+}
+
+fn allowed_extension_ids(configured_id: Option<&str>) -> Result<Vec<String>, String> {
+    let mut ids = vec![CHROME_WEB_STORE_EXTENSION_ID.to_string()];
+    if let Some(configured_id) = configured_id.filter(|value| !value.trim().is_empty()) {
+        let configured_id = validate_extension_id(configured_id)?;
+        if configured_id != CHROME_WEB_STORE_EXTENSION_ID {
+            ids.push(configured_id);
+        }
+    }
+    Ok(ids)
+}
+
+fn classify_runtime_extension<'a>(
+    runtime_id: Option<&str>,
+    configured_ids: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<ExtensionIdentity> {
+    let runtime_id = runtime_id?;
+    let configured_ids = configured_ids
+        .into_iter()
+        .flatten()
+        .filter_map(normalize_extension_id)
+        .filter(|id| id != CHROME_WEB_STORE_EXTENSION_ID)
+        .collect::<Vec<_>>();
+    Some(classify_extension_id(runtime_id, &configured_ids))
+}
+
+fn browser_matches_manifest_kind(
+    browser: Option<&str>,
+    manifest_kind: BrowserManifestKind,
+) -> bool {
     let Some(browser) = browser else {
         return false;
     };
@@ -752,9 +801,9 @@ fn registered_manifest_status_for_target(
     expected_manifest_path: &Path,
 ) -> (Option<String>, bool) {
     let default_path = registry_default_value(target.registry_key);
-    let root_path = target
-        .root_value_registry_key
-        .and_then(|registry_key| registry_named_value(registry_key, Some("com.velocitydl.native_host")));
+    let root_path = target.root_value_registry_key.and_then(|registry_key| {
+        registry_named_value(registry_key, Some("com.velocitydl.native_host"))
+    });
 
     let default_matches = default_path
         .as_ref()
@@ -809,22 +858,29 @@ fn resolve_browser_extension_id(
 fn write_native_manifest(
     out_path: &Path,
     host_exe_path: &Path,
-    extension_id: &str,
+    extension_ids: &[String],
     browser_prefix: &str,
 ) -> Result<(), String> {
+    let allowed_origins = extension_ids
+        .iter()
+        .map(|extension_id| format!("{browser_prefix}-extension://{extension_id}/"))
+        .collect::<Vec<_>>();
     let manifest = serde_json::json!({
         "name": "com.velocitydl.native_host",
         "description": "VelocityDL Native Messaging Host",
         "path": host_exe_path,
         "type": "stdio",
-        "allowed_origins": [format!("{browser_prefix}-extension://{extension_id}/")],
+        "allowed_origins": allowed_origins,
     });
     let raw = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     std::fs::write(out_path, raw).map_err(|e| e.to_string())
 }
 
 #[cfg(windows)]
-fn set_native_messaging_registry_value(registry_key: &str, manifest_path: &Path) -> Result<(), String> {
+fn set_native_messaging_registry_value(
+    registry_key: &str,
+    manifest_path: &Path,
+) -> Result<(), String> {
     set_registry_string_value(registry_key, None, manifest_path)
 }
 
@@ -888,9 +944,7 @@ fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
         Some("flac")
     } else if ct.contains("audio/wav") {
         Some("wav")
-    } else if ct.contains("application/vnd.apple.mpegurl")
-        || ct.contains("application/x-mpegurl")
-    {
+    } else if ct.contains("application/vnd.apple.mpegurl") || ct.contains("application/x-mpegurl") {
         Some("m3u8")
     } else if ct.contains("application/dash+xml") {
         Some("mpd")
@@ -918,7 +972,9 @@ fn extension_from_path_like(value: &str) -> Option<String> {
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase());
     match ext {
-        Some(ref e) if !e.is_empty() && e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()) => {
+        Some(ref e)
+            if !e.is_empty() && e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
             Some(e.clone())
         }
         _ => None,
@@ -1151,7 +1207,10 @@ fn resolve_title_from_hints(
         if Path::new(&safe).extension().is_some() {
             return safe;
         }
-        if base == "browser_capture" || base == "downloaded_media" || Path::new(&base).extension().is_some() {
+        if base == "browser_capture"
+            || base == "downloaded_media"
+            || Path::new(&base).extension().is_some()
+        {
             base = safe;
         }
     }
@@ -1287,10 +1346,18 @@ async fn detect_remote_file_hints<R: Runtime>(
     let mut size: Option<u64> = None;
 
     if let Ok(resp) = apply_headers(client.head(url)).send().await {
-        if let Some(disposition) = resp.headers().get(CONTENT_DISPOSITION).and_then(|h| h.to_str().ok()) {
+        if let Some(disposition) = resp
+            .headers()
+            .get(CONTENT_DISPOSITION)
+            .and_then(|h| h.to_str().ok())
+        {
             filename = filename_from_content_disposition(disposition);
         }
-        if let Some(ct) = resp.headers().get(CONTENT_TYPE).and_then(|h| h.to_str().ok()) {
+        if let Some(ct) = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+        {
             ext = extension_from_content_type(ct).map(|v| v.to_string());
         }
         if let Some(cl) = resp
@@ -1304,14 +1371,25 @@ async fn detect_remote_file_hints<R: Runtime>(
     }
 
     if filename.is_none() || ext.is_none() || size.is_none() {
-        if let Ok(resp) = apply_headers(client.get(url).header(RANGE, "bytes=0-0")).send().await {
+        if let Ok(resp) = apply_headers(client.get(url).header(RANGE, "bytes=0-0"))
+            .send()
+            .await
+        {
             if filename.is_none() {
-                if let Some(disposition) = resp.headers().get(CONTENT_DISPOSITION).and_then(|h| h.to_str().ok()) {
+                if let Some(disposition) = resp
+                    .headers()
+                    .get(CONTENT_DISPOSITION)
+                    .and_then(|h| h.to_str().ok())
+                {
                     filename = filename_from_content_disposition(disposition);
                 }
             }
             if ext.is_none() {
-                if let Some(ct) = resp.headers().get(CONTENT_TYPE).and_then(|h| h.to_str().ok()) {
+                if let Some(ct) = resp
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|h| h.to_str().ok())
+                {
                     ext = extension_from_content_type(ct).map(|v| v.to_string());
                 }
             }
@@ -1321,7 +1399,11 @@ async fn detect_remote_file_hints<R: Runtime>(
                     .get("content-range")
                     .and_then(|h| h.to_str().ok())
                 {
-                    if let Some(total) = content_range.split('/').next_back().and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(total) = content_range
+                        .split('/')
+                        .next_back()
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         size = Some(total);
                     }
                 }
@@ -1392,48 +1474,51 @@ async fn validate_direct_download_target<R: Runtime>(
 
     let inspect_response =
         |resp: &reqwest::Response, range_requested: bool| -> Result<DirectDownloadProbe, String> {
-        if !resp.status().is_success() {
-            return Err(format!("Direct download validation failed with HTTP {}", resp.status()));
-        }
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "Direct download validation failed with HTTP {}",
+                    resp.status()
+                ));
+            }
 
-        let content_type = resp
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            .map(|s| s.to_string());
-        let content_disposition = resp
-            .headers()
-            .get(CONTENT_DISPOSITION)
-            .and_then(|h| h.to_str().ok())
-            .map(|s| s.to_string());
-        let supports_ranges =
-            range_requested && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-        let size = if supports_ranges {
-            response_total_size(resp.headers())
-        } else {
-            None
+            let content_type = resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string());
+            let content_disposition = resp
+                .headers()
+                .get(CONTENT_DISPOSITION)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string());
+            let supports_ranges =
+                range_requested && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+            let size = if supports_ranges {
+                response_total_size(resp.headers())
+            } else {
+                None
+            };
+
+            if !direct_response_looks_downloadable(
+                url,
+                content_type.as_deref(),
+                content_disposition.as_deref(),
+            ) {
+                return Err(format!(
+                    "Direct URL returned a non-download response ({})",
+                    content_type
+                        .clone()
+                        .unwrap_or_else(|| "unknown content type".to_string())
+                ));
+            }
+
+            Ok(DirectDownloadProbe {
+                content_type,
+                content_disposition,
+                size,
+                supports_ranges,
+            })
         };
-
-        if !direct_response_looks_downloadable(
-            url,
-            content_type.as_deref(),
-            content_disposition.as_deref(),
-        ) {
-            return Err(format!(
-                "Direct URL returned a non-download response ({})",
-                content_type
-                    .clone()
-                    .unwrap_or_else(|| "unknown content type".to_string())
-            ));
-        }
-
-        Ok(DirectDownloadProbe {
-            content_type,
-            content_disposition,
-            size,
-            supports_ranges,
-        })
-    };
 
     match apply_headers(client.get(url).header(RANGE, "bytes=0-0"))
         .send()
@@ -1503,16 +1588,17 @@ pub async fn get_extension_health<R: Runtime>(
     let settings = AppSettings::load(crate::pathing::config_dir_for_app(&app)?).await;
 
     let (status, status_label) = match snapshot.last_heartbeat_at_ms {
-        Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_FRESH_MS => (
-            "connected".to_string(),
-            "Extension Connected".to_string(),
-        ),
-        Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_STALE_MS => (
-            "stale".to_string(),
-            "Extension Seen Recently".to_string(),
-        ),
+        Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_FRESH_MS => {
+            ("connected".to_string(), "Extension Connected".to_string())
+        }
+        Some(ts) if now_ms.saturating_sub(ts) <= HEARTBEAT_STALE_MS => {
+            ("stale".to_string(), "Extension Seen Recently".to_string())
+        }
         Some(_) => ("inactive".to_string(), "Extension Not Active".to_string()),
-        None => ("not_detected".to_string(), "Extension Not Detected".to_string()),
+        None => (
+            "not_detected".to_string(),
+            "Extension Not Detected".to_string(),
+        ),
     };
 
     let status_label = if !settings.accept_browser_download_requests {
@@ -1548,18 +1634,20 @@ pub async fn get_browser_integration_status<R: Runtime>(
     let health_snapshot = health.snapshot().await;
     let last_runtime_id = health_snapshot.last_seen_runtime_id.clone();
     let last_browser = health_snapshot.last_seen_browser.clone();
-    let chrome_runtime_matches_manifest = browser_matches_manifest_kind(
-        last_browser.as_deref(),
-        BrowserManifestKind::ChromeLike,
-    )
-        && last_runtime_id.is_some()
-        && last_runtime_id == chrome_manifest_id;
-    let edge_runtime_matches_manifest = browser_matches_manifest_kind(
-        last_browser.as_deref(),
-        BrowserManifestKind::Edge,
-    )
-        && last_runtime_id.is_some()
-        && last_runtime_id == edge_manifest_id;
+    let configured_manifest_ids = manifest_extension_ids(&chrome_manifest)
+        .into_iter()
+        .chain(manifest_extension_ids(&edge_manifest))
+        .collect::<Vec<_>>();
+    let connected_extension = classify_runtime_extension(
+        last_runtime_id.as_deref(),
+        configured_manifest_ids.iter().map(|id| Some(id.as_str())),
+    );
+    let chrome_runtime_matches_manifest =
+        browser_matches_manifest_kind(last_browser.as_deref(), BrowserManifestKind::ChromeLike)
+            && manifest_allows_extension_id(&chrome_manifest, last_runtime_id.as_deref());
+    let edge_runtime_matches_manifest =
+        browser_matches_manifest_kind(last_browser.as_deref(), BrowserManifestKind::Edge)
+            && manifest_allows_extension_id(&edge_manifest, last_runtime_id.as_deref());
 
     let browser_profiles = native_browser_targets()
         .iter()
@@ -1572,11 +1660,9 @@ pub async fn get_browser_integration_status<R: Runtime>(
                 registered_manifest_status_for_target(target, &manifest_path);
             #[cfg(not(windows))]
             let (registered_manifest_path, registered): (Option<String>, bool) = (None, false);
-            let runtime_matches_manifest = browser_matches_manifest_kind(
-                last_browser.as_deref(),
-                target.manifest_kind,
-            ) && last_runtime_id.is_some()
-                && last_runtime_id == manifest_extension_id;
+            let runtime_matches_manifest =
+                browser_matches_manifest_kind(last_browser.as_deref(), target.manifest_kind)
+                    && manifest_allows_extension_id(&manifest_path, last_runtime_id.as_deref());
 
             BrowserIntegrationBrowserStatus {
                 id: target.id.to_string(),
@@ -1595,26 +1681,32 @@ pub async fn get_browser_integration_status<R: Runtime>(
         .collect();
 
     #[cfg(windows)]
-    let (chrome_registered_manifest_path, chrome_registered) = registered_manifest_status_for_target(
-        browser_target("chrome").expect("chrome target"),
-        &chrome_manifest,
-    );
+    let (chrome_registered_manifest_path, chrome_registered) =
+        registered_manifest_status_for_target(
+            browser_target("chrome").expect("chrome target"),
+            &chrome_manifest,
+        );
     #[cfg(not(windows))]
-    let (chrome_registered_manifest_path, chrome_registered): (Option<String>, bool) = (None, false);
+    let (chrome_registered_manifest_path, chrome_registered): (Option<String>, bool) =
+        (None, false);
     #[cfg(windows)]
-    let (chromium_registered_manifest_path, chromium_registered) = registered_manifest_status_for_target(
-        browser_target("chromium").expect("chromium target"),
-        &chrome_manifest,
-    );
+    let (chromium_registered_manifest_path, chromium_registered) =
+        registered_manifest_status_for_target(
+            browser_target("chromium").expect("chromium target"),
+            &chrome_manifest,
+        );
     #[cfg(not(windows))]
-    let (chromium_registered_manifest_path, chromium_registered): (Option<String>, bool) = (None, false);
+    let (chromium_registered_manifest_path, chromium_registered): (Option<String>, bool) =
+        (None, false);
     #[cfg(windows)]
-    let (helium_registered_manifest_path, helium_registered) = registered_manifest_status_for_target(
-        browser_target("helium").expect("helium target"),
-        &chrome_manifest,
-    );
+    let (helium_registered_manifest_path, helium_registered) =
+        registered_manifest_status_for_target(
+            browser_target("helium").expect("helium target"),
+            &chrome_manifest,
+        );
     #[cfg(not(windows))]
-    let (helium_registered_manifest_path, helium_registered): (Option<String>, bool) = (None, false);
+    let (helium_registered_manifest_path, helium_registered): (Option<String>, bool) =
+        (None, false);
     #[cfg(windows)]
     let (edge_registered_manifest_path, edge_registered) = registered_manifest_status_for_target(
         browser_target("edge").expect("edge target"),
@@ -1637,10 +1729,18 @@ pub async fn get_browser_integration_status<R: Runtime>(
         chromium_manifest_installed: chrome_manifest.exists() && chromium_registered,
         helium_manifest_installed: chrome_manifest.exists() && helium_registered,
         edge_manifest_installed: edge_manifest.exists() && edge_registered,
-        chrome_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
-        chromium_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
-        helium_manifest_path: chrome_manifest.exists().then(|| chrome_manifest.to_string_lossy().to_string()),
-        edge_manifest_path: edge_manifest.exists().then(|| edge_manifest.to_string_lossy().to_string()),
+        chrome_manifest_path: chrome_manifest
+            .exists()
+            .then(|| chrome_manifest.to_string_lossy().to_string()),
+        chromium_manifest_path: chrome_manifest
+            .exists()
+            .then(|| chrome_manifest.to_string_lossy().to_string()),
+        helium_manifest_path: chrome_manifest
+            .exists()
+            .then(|| chrome_manifest.to_string_lossy().to_string()),
+        edge_manifest_path: edge_manifest
+            .exists()
+            .then(|| edge_manifest.to_string_lossy().to_string()),
         chrome_registered_manifest_path,
         chromium_registered_manifest_path,
         helium_registered_manifest_path,
@@ -1652,6 +1752,7 @@ pub async fn get_browser_integration_status<R: Runtime>(
         last_seen_runtime_id: last_runtime_id,
         last_seen_browser: last_browser,
         last_heartbeat_at_ms: health_snapshot.last_heartbeat_at_ms,
+        connected_extension,
         chrome_runtime_matches_manifest,
         chromium_runtime_matches_manifest: chrome_runtime_matches_manifest,
         helium_runtime_matches_manifest: chrome_runtime_matches_manifest,
@@ -1688,12 +1789,20 @@ pub async fn update_tool_binary<R: Runtime>(
     let normalized = tool.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "yt-dlp" | "ytdlp" => {
-            binaries::update_ytdlp(&app).await.map_err(|e| e.to_string())?;
-            Ok(map_tool_status(binaries::get_ytdlp_status(&app, true).await))
+            binaries::update_ytdlp(&app)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(map_tool_status(
+                binaries::get_ytdlp_status(&app, true).await,
+            ))
         }
         "ffmpeg" => {
-            binaries::update_ffmpeg(&app).await.map_err(|e| e.to_string())?;
-            Ok(map_tool_status(binaries::get_ffmpeg_status(&app, true).await))
+            binaries::update_ffmpeg(&app)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(map_tool_status(
+                binaries::get_ffmpeg_status(&app, true).await,
+            ))
         }
         _ => Err("Unsupported tool update target".to_string()),
     }
@@ -1767,7 +1876,8 @@ pub async fn install_browser_integration<R: Runtime>(
         let host_path = stage_native_host_executable(&app)?;
         let manifest_dir = native_manifest_output_dir()?;
         std::fs::create_dir_all(&manifest_dir).map_err(|e| e.to_string())?;
-        let chrome_manifest = manifest_path_for_kind(&manifest_dir, BrowserManifestKind::ChromeLike);
+        let chrome_manifest =
+            manifest_path_for_kind(&manifest_dir, BrowserManifestKind::ChromeLike);
         let edge_manifest = manifest_path_for_kind(&manifest_dir, BrowserManifestKind::Edge);
         let health_snapshot = app.state::<ExtensionHealthState>().snapshot().await;
 
@@ -1791,10 +1901,11 @@ pub async fn install_browser_integration<R: Runtime>(
         let mut edge_manifest_path = None;
 
         if let Some(chrome_id) = chrome_id {
+            let allowed_ids = allowed_extension_ids(Some(&chrome_id))?;
             write_native_manifest(
                 &chrome_manifest,
                 &host_path,
-                &chrome_id,
+                &allowed_ids,
                 manifest_prefix_for_kind(BrowserManifestKind::ChromeLike),
             )?;
             for target in native_browser_targets()
@@ -1815,10 +1926,11 @@ pub async fn install_browser_integration<R: Runtime>(
         }
 
         if let Some(edge_id) = edge_id {
+            let allowed_ids = allowed_extension_ids(Some(&edge_id))?;
             write_native_manifest(
                 &edge_manifest,
                 &host_path,
-                &edge_id,
+                &allowed_ids,
                 manifest_prefix_for_kind(BrowserManifestKind::Edge),
             )?;
             for target in native_browser_targets()
@@ -1857,7 +1969,9 @@ pub async fn open_extension_setup_link<R: Runtime>(
     app: AppHandle<R>,
     url: String,
 ) -> Result<(), String> {
-    app.opener().open_url(url, None::<String>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(url, None::<String>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1896,13 +2010,7 @@ pub async fn set_external_capture_listener_ready<R: Runtime>(
 
 #[tauri::command]
 pub async fn reveal_main_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found".to_string())?;
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
-    Ok(())
+    crate::window_activation::reveal_main_window(&app, None)
 }
 
 #[tauri::command]
@@ -1922,8 +2030,10 @@ pub async fn fetch_metadata<R: Runtime>(
     headers: Option<HashMap<String, String>>,
     attempt_session_id: Option<String>,
 ) -> Result<ytdlp::YtDlpMetadata, String> {
-    let merged_headers =
-        crate::request_context::merge_request_headers(headers.as_ref(), auth_cookie_header(&app).await.as_deref());
+    let merged_headers = crate::request_context::merge_request_headers(
+        headers.as_ref(),
+        auth_cookie_header(&app).await.as_deref(),
+    );
     // Step 1: probe direct media first (works for many pasted links even without file extension).
     emit_download_attempt(
         &app,
@@ -1984,23 +2094,25 @@ pub async fn fetch_metadata<R: Runtime>(
     let result = timeout(
         Duration::from_secs(45),
         tokio::task::spawn_blocking(move || {
-            let mut on_strategy = |label: &str,
-                                   state: ytdlp::StrategyAttemptState,
-                                   detail: Option<&str>| {
-                let status = match state {
-                    ytdlp::StrategyAttemptState::Running => AttemptStatus::Running,
-                    ytdlp::StrategyAttemptState::Succeeded => AttemptStatus::Succeeded,
-                    ytdlp::StrategyAttemptState::Failed => AttemptStatus::Failed,
+            let mut on_strategy =
+                |label: &str, state: ytdlp::StrategyAttemptState, detail: Option<&str>| {
+                    let status = match state {
+                        ytdlp::StrategyAttemptState::Running => AttemptStatus::Running,
+                        ytdlp::StrategyAttemptState::Succeeded => AttemptStatus::Succeeded,
+                        ytdlp::StrategyAttemptState::Failed => AttemptStatus::Failed,
+                    };
+                    emit_download_attempt(
+                        &app_for_attempts,
+                        attempt_id_for_attempts.as_deref(),
+                        &format!(
+                            "ytdlp_strategy:{}",
+                            label.to_ascii_lowercase().replace(' ', "_")
+                        ),
+                        format!("yt-dlp strategy: {label}"),
+                        status,
+                        detail.map(|value| value.to_string()),
+                    );
                 };
-                emit_download_attempt(
-                    &app_for_attempts,
-                    attempt_id_for_attempts.as_deref(),
-                    &format!("ytdlp_strategy:{}", label.to_ascii_lowercase().replace(' ', "_")),
-                    format!("yt-dlp strategy: {label}"),
-                    status,
-                    detail.map(|value| value.to_string()),
-                );
-            };
             ytdlp::get_metadata(
                 &path_clone,
                 &config_clone,
@@ -2051,26 +2163,29 @@ pub async fn fetch_metadata<R: Runtime>(
                 let retry_result = timeout(
                     Duration::from_secs(45),
                     tokio::task::spawn_blocking(move || {
-                        let mut on_strategy = |label: &str,
-                                               state: ytdlp::StrategyAttemptState,
-                                               detail: Option<&str>| {
-                            let status = match state {
-                                ytdlp::StrategyAttemptState::Running => AttemptStatus::Running,
-                                ytdlp::StrategyAttemptState::Succeeded => AttemptStatus::Succeeded,
-                                ytdlp::StrategyAttemptState::Failed => AttemptStatus::Failed,
+                        let mut on_strategy =
+                            |label: &str,
+                             state: ytdlp::StrategyAttemptState,
+                             detail: Option<&str>| {
+                                let status = match state {
+                                    ytdlp::StrategyAttemptState::Running => AttemptStatus::Running,
+                                    ytdlp::StrategyAttemptState::Succeeded => {
+                                        AttemptStatus::Succeeded
+                                    }
+                                    ytdlp::StrategyAttemptState::Failed => AttemptStatus::Failed,
+                                };
+                                emit_download_attempt(
+                                    &app_for_retry_attempts,
+                                    attempt_id_for_retry.as_deref(),
+                                    &format!(
+                                        "retry_ytdlp_strategy:{}",
+                                        label.to_ascii_lowercase().replace(' ', "_")
+                                    ),
+                                    format!("yt-dlp retry strategy: {label}"),
+                                    status,
+                                    detail.map(|value| value.to_string()),
+                                );
                             };
-                            emit_download_attempt(
-                                &app_for_retry_attempts,
-                                attempt_id_for_retry.as_deref(),
-                                &format!(
-                                    "retry_ytdlp_strategy:{}",
-                                    label.to_ascii_lowercase().replace(' ', "_")
-                                ),
-                                format!("yt-dlp retry strategy: {label}"),
-                                status,
-                                detail.map(|value| value.to_string()),
-                            );
-                        };
                         ytdlp::get_metadata(
                             &path_retry,
                             &config_retry,
@@ -2115,7 +2230,9 @@ pub async fn fetch_metadata<R: Runtime>(
                     AttemptStatus::Failed,
                     Some("Auto-update failed".to_string()),
                 );
-                if let Some(direct) = probe_direct_media_metadata(&app, &url, Some(&merged_headers)).await {
+                if let Some(direct) =
+                    probe_direct_media_metadata(&app, &url, Some(&merged_headers)).await
+                {
                     Ok(direct)
                 } else {
                     Err(first_err.to_string())
@@ -2149,6 +2266,7 @@ pub async fn add_download<R: Runtime>(
     request_method: Option<String>,
     request_body: Option<NativeRequestBody>,
     network_request_id: Option<String>,
+    reveal_on_accept: Option<bool>,
 ) -> Result<DownloadItem, String> {
     let id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let normalized_request_method = request_method
@@ -2157,13 +2275,17 @@ pub async fn add_download<R: Runtime>(
         .trim()
         .to_ascii_uppercase();
     if normalized_request_method != "GET" && normalized_request_method != "POST" {
-        return Err(format!("Unsupported browser request method '{normalized_request_method}'"));
+        return Err(format!(
+            "Unsupported browser request method '{normalized_request_method}'"
+        ));
     }
     if normalized_request_method == "POST" && request_body.is_none() {
         return Err("The browser reported a POST download but its body was unavailable. Re-submit the download from the browser.".to_string());
     }
-    let merged_probe_headers =
-        crate::request_context::merge_request_headers(headers.as_ref(), auth_cookie_header(&app).await.as_deref());
+    let merged_probe_headers = crate::request_context::merge_request_headers(
+        headers.as_ref(),
+        auth_cookie_header(&app).await.as_deref(),
+    );
     emit_download_attempt(
         &app,
         attempt_session_id.as_deref(),
@@ -2178,7 +2300,10 @@ pub async fn add_download<R: Runtime>(
         strategy_hint_to_media_strategy(strategy_hint.as_deref())
             .unwrap_or_else(|| classify_media_strategy(&url))
     };
-    if normalized_request_method == "GET" && audio_url.is_none() && matches!(strategy, MediaStrategy::MetadataExtractor) {
+    if normalized_request_method == "GET"
+        && audio_url.is_none()
+        && matches!(strategy, MediaStrategy::MetadataExtractor)
+    {
         emit_download_attempt(
             &app,
             attempt_session_id.as_deref(),
@@ -2187,7 +2312,9 @@ pub async fn add_download<R: Runtime>(
             AttemptStatus::Running,
             None,
         );
-        if let Some(direct) = probe_direct_media_metadata(&app, &url, Some(&merged_probe_headers)).await {
+        if let Some(direct) =
+            probe_direct_media_metadata(&app, &url, Some(&merged_probe_headers)).await
+        {
             strategy = strategy_from_detected_ext(&direct.ext);
             emit_download_attempt(
                 &app,
@@ -2213,7 +2340,10 @@ pub async fn add_download<R: Runtime>(
         }
     }
     let mut direct_download_probe: Option<DirectDownloadProbe> = None;
-    if normalized_request_method == "GET" && audio_url.is_none() && matches!(strategy, MediaStrategy::DirectFile) {
+    if normalized_request_method == "GET"
+        && audio_url.is_none()
+        && matches!(strategy, MediaStrategy::DirectFile)
+    {
         emit_download_attempt(
             &app,
             attempt_session_id.as_deref(),
@@ -2222,7 +2352,9 @@ pub async fn add_download<R: Runtime>(
             AttemptStatus::Running,
             None,
         );
-        match validate_direct_download_target(&app, &url, headers.as_ref(), referrer.as_deref()).await {
+        match validate_direct_download_target(&app, &url, headers.as_ref(), referrer.as_deref())
+            .await
+        {
             Ok(validation) => {
                 let detail = validation
                     .content_type
@@ -2299,14 +2431,16 @@ pub async fn add_download<R: Runtime>(
             .is_some_and(|probe| !probe.supports_ranges)
     {
         0
-    } else { match total_size {
-        Some(v) if v > 0 => v,
-        _ => direct_download_probe
-            .as_ref()
-            .and_then(|probe| probe.size)
-            .or(detected_size)
-            .unwrap_or(0),
-    }};
+    } else {
+        match total_size {
+            Some(v) if v > 0 => v,
+            _ => direct_download_probe
+                .as_ref()
+                .and_then(|probe| probe.size)
+                .or(detected_size)
+                .unwrap_or(0),
+        }
+    };
 
     let item = DownloadItem {
         id: id.clone(),
@@ -2350,6 +2484,12 @@ pub async fn add_download<R: Runtime>(
         "Queue download worker",
         AttemptStatus::Succeeded,
         Some(item.id.clone()),
+    );
+    crate::window_activation::reveal_main_window_for_new_download(
+        &app,
+        &item.id,
+        reveal_on_accept.unwrap_or(false),
+        item.download_origin.as_deref(),
     );
 
     Ok(item)
@@ -2500,17 +2640,67 @@ pub async fn start_sniffing<R: Runtime>(app: AppHandle<R>, url: String) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        background_process_creation_flags, direct_response_looks_downloadable,
-        extension_install_dir, has_trustworthy_filename_hint, is_page_like_content_type,
-        native_browser_targets, probe_direct_media_metadata, resolve_browser_extension_id,
-        resolve_title_from_hints, should_copy_artifact, stage_file_artifact,
-        strategy_from_detected_ext, strategy_hint_to_media_strategy, BrowserManifestKind,
-        CHROME_WEB_STORE_INSTALL_URL,
+        allowed_extension_ids, background_process_creation_flags, classify_runtime_extension,
+        direct_response_looks_downloadable, extension_install_dir, has_trustworthy_filename_hint,
+        is_page_like_content_type, native_browser_targets, probe_direct_media_metadata,
+        resolve_browser_extension_id, resolve_title_from_hints, should_copy_artifact,
+        stage_file_artifact, strategy_from_detected_ext, strategy_hint_to_media_strategy,
+        BrowserManifestKind, CHROME_WEB_STORE_INSTALL_URL,
     };
+    use crate::extension_identity::{ExtensionIdentityKind, CHROME_WEB_STORE_EXTENSION_ID};
     use crate::protocols::strategy::MediaStrategy;
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn extension_identity_origin_list_always_starts_with_production() {
+        assert_eq!(
+            allowed_extension_ids(None).unwrap(),
+            vec![CHROME_WEB_STORE_EXTENSION_ID.to_string()]
+        );
+    }
+
+    #[test]
+    fn extension_identity_origin_list_adds_one_distinct_configured_local_id() {
+        let local_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(
+            allowed_extension_ids(Some(local_id)).unwrap(),
+            vec![
+                CHROME_WEB_STORE_EXTENSION_ID.to_string(),
+                local_id.to_string()
+            ]
+        );
+        assert_eq!(
+            allowed_extension_ids(Some(&CHROME_WEB_STORE_EXTENSION_ID.to_uppercase())).unwrap(),
+            vec![CHROME_WEB_STORE_EXTENSION_ID.to_string()]
+        );
+        assert!(allowed_extension_ids(Some("not-an-extension-id")).is_err());
+    }
+
+    #[test]
+    fn extension_identity_status_accepts_production_without_a_manifest() {
+        let identity = classify_runtime_extension(
+            Some(CHROME_WEB_STORE_EXTENSION_ID),
+            std::iter::empty::<Option<&str>>(),
+        )
+        .unwrap();
+
+        assert_eq!(identity.kind, ExtensionIdentityKind::ChromeWebStore);
+        assert!(identity.supported);
+    }
+
+    #[test]
+    fn extension_identity_status_distinguishes_configured_local_and_unknown_ids() {
+        let local_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let local = classify_runtime_extension(Some(local_id), [Some(local_id)]).unwrap();
+        let unknown =
+            classify_runtime_extension(Some("cccccccccccccccccccccccccccccccc"), [Some(local_id)])
+                .unwrap();
+
+        assert_eq!(local.kind, ExtensionIdentityKind::LocalUnpacked);
+        assert_eq!(unknown.kind, ExtensionIdentityKind::Unsupported);
+    }
 
     #[tokio::test]
     async fn direct_range_probe_uses_content_range_total_instead_of_one_byte_length() {
@@ -2636,8 +2826,14 @@ mod tests {
 
     #[test]
     fn direct_probe_extension_maps_to_runtime_strategy() {
-        assert_eq!(strategy_from_detected_ext("m3u8"), MediaStrategy::HlsManifest);
-        assert_eq!(strategy_from_detected_ext("mpd"), MediaStrategy::DashManifest);
+        assert_eq!(
+            strategy_from_detected_ext("m3u8"),
+            MediaStrategy::HlsManifest
+        );
+        assert_eq!(
+            strategy_from_detected_ext("mpd"),
+            MediaStrategy::DashManifest
+        );
         assert_eq!(strategy_from_detected_ext("mp4"), MediaStrategy::DirectFile);
     }
 
@@ -2773,13 +2969,7 @@ mod tests {
     fn native_browser_profiles_cover_popular_chromium_browsers() {
         let targets = native_browser_targets();
         for browser_id in [
-            "chrome",
-            "edge",
-            "helium",
-            "brave",
-            "vivaldi",
-            "opera",
-            "opera_gx",
+            "chrome", "edge", "helium", "brave", "vivaldi", "opera", "opera_gx",
         ] {
             let target = targets
                 .iter()
@@ -2809,14 +2999,9 @@ mod tests {
 
     #[test]
     fn chrome_like_manifest_defaults_to_webstore_extension_id() {
-        let resolved = resolve_browser_extension_id(
-            None,
-            None,
-            None,
-            None,
-            BrowserManifestKind::ChromeLike,
-        )
-        .expect("resolution should not fail");
+        let resolved =
+            resolve_browser_extension_id(None, None, None, None, BrowserManifestKind::ChromeLike)
+                .expect("resolution should not fail");
 
         assert_eq!(
             resolved.as_deref(),

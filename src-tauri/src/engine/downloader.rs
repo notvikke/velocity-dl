@@ -1,5 +1,5 @@
-use crate::engine::segmenter::Segment;
 use crate::engine::rate_limiter::GlobalSpeedLimiter;
+use crate::engine::segmenter::Segment;
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -7,8 +7,8 @@ use log::{error, warn};
 use reqwest::StatusCode;
 use reqwest::{header, Client};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{Mutex, RwLock};
@@ -94,13 +94,18 @@ impl Downloader {
     }
 
     pub fn with_session_refresh(mut self, config_dir: PathBuf, network_request_id: String) -> Self {
-        self.session_refresh = Some(SessionRefreshContext { config_dir, network_request_id });
+        self.session_refresh = Some(SessionRefreshContext {
+            config_dir,
+            network_request_id,
+        });
         self
     }
 
     async fn send_segment_request(&self, segment: &Segment) -> Result<reqwest::Response> {
         let mut request = self.client.request(self.request_method.clone(), &self.url);
-        if let Some(body) = &self.request_body { request = request.body(body.clone()); }
+        if let Some(body) = &self.request_body {
+            request = request.body(body.clone());
+        }
         let headers = self.headers.read().await;
         let mut has_ua = false;
         let mut has_referer = false;
@@ -110,14 +115,22 @@ impl Downloader {
             request = request.header(key, value);
         }
         drop(headers);
-        if !has_ua { request = request.header(header::USER_AGENT, APP_USER_AGENT); }
+        if !has_ua {
+            request = request.header(header::USER_AGENT, APP_USER_AGENT);
+        }
         if !has_referer && self.url.contains("googlevideo.com") {
             request = request.header(header::REFERER, "https://www.youtube.com/");
         }
         if self.total_size > 0 {
-            request = request.header(header::RANGE, format!("bytes={}-{}", segment.current, segment.end));
+            request = request.header(
+                header::RANGE,
+                format!("bytes={}-{}", segment.current, segment.end),
+            );
         }
-        request.send().await.context("Failed to send captured browser request")
+        request
+            .send()
+            .await
+            .context("Failed to send captured browser request")
     }
 
     pub async fn download_segment(&self, segment_index: usize) -> Result<()> {
@@ -141,8 +154,8 @@ impl Downloader {
                         )));
                     }
                     attempt += 1;
-                    let backoff_ms =
-                        RETRY_BASE_DELAY_MS.saturating_mul(1u64 << (attempt.saturating_sub(1) as u32));
+                    let backoff_ms = RETRY_BASE_DELAY_MS
+                        .saturating_mul(1u64 << (attempt.saturating_sub(1) as u32));
                     warn!(
                         "Segment {} retry {}/{} after error: {}",
                         segment_index, attempt, MAX_SEGMENT_RETRIES, err
@@ -199,23 +212,39 @@ impl Downloader {
         }
 
         if self.total_size > 0 && self.request_method != reqwest::Method::GET {
-            return Err(anyhow!("Ranged downloads require GET; captured request used {}", self.request_method));
+            return Err(anyhow!(
+                "Ranged downloads require GET; captured request used {}",
+                self.request_method
+            ));
         }
         let requested_range_start = segment.current;
-        let mut response = self.send_segment_request(&segment).await
+        let mut response = self
+            .send_segment_request(&segment)
+            .await
             .with_context(|| format!("Failed to send request for segment {}", segment_index))?;
-        if matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-            if let Some(refresh) = self.session_refresh.as_ref()
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            if let Some(refresh) = self
+                .session_refresh
+                .as_ref()
                 .filter(|_| !self.session_refresh_attempted.swap(true, Ordering::AcqRel))
             {
                 let fresh = crate::browser_session::request_session_refresh(
                     &refresh.config_dir,
                     &self.url,
                     &refresh.network_request_id,
-                ).await.map_err(anyhow::Error::msg)?;
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
                 let fresh_headers = crate::request_context::to_headermap(Some(&fresh.headers));
                 let mut headers = self.headers.write().await;
-                for (name, value) in fresh_headers { if let Some(name) = name { headers.insert(name, value); } }
+                for (name, value) in fresh_headers {
+                    if let Some(name) = name {
+                        headers.insert(name, value);
+                    }
+                }
                 drop(headers);
                 response = self.send_segment_request(&segment).await?;
             }
@@ -428,9 +457,13 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..read]);
             assert!(request.starts_with("POST /export HTTP/1.1"), "{request}");
             assert!(request.ends_with("format=csv"), "{request}");
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na,b").await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na,b")
+                .await
+                .unwrap();
         });
-        let temp_path = std::env::temp_dir().join(format!("velocitydl-post-{}.csv", uuid::Uuid::new_v4()));
+        let temp_path =
+            std::env::temp_dir().join(format!("velocitydl-post-{}.csv", uuid::Uuid::new_v4()));
         let downloader = Downloader::new_with_request(
             format!("http://{addr}/export"),
             0,

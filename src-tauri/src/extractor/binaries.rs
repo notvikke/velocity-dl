@@ -224,7 +224,10 @@ pub async fn get_ffmpeg_status<R: Runtime>(app: &AppHandle<R>, include_remote: b
             last_error: None,
         },
         Ok(None) => {
-            if let Ok(output) = std::process::Command::new("ffmpeg").arg("-version").output() {
+            if let Ok(output) = std::process::Command::new("ffmpeg")
+                .arg("-version")
+                .output()
+            {
                 if output.status.success() {
                     let first_line = String::from_utf8(output.stdout)
                         .ok()
@@ -368,10 +371,7 @@ pub async fn update_ffmpeg<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     let binaries_dir = get_binaries_dir(app).await?;
     let ffmpeg_path = binaries_dir.join("ffmpeg.exe");
 
-    let _ = app.emit(
-        "ffmpeg_status",
-        "Downloading FFmpeg update (~100MB)...",
-    );
+    let _ = app.emit("ffmpeg_status", "Downloading FFmpeg update (~100MB)...");
 
     let client = Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")

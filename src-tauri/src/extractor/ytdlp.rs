@@ -152,10 +152,7 @@ const PROFILES: &[StrategyProfile] = &[
 ];
 
 fn normalized_host(url: &str) -> String {
-    let without_scheme = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url);
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     without_scheme
         .split('/')
         .next()
@@ -241,7 +238,10 @@ fn strategy_plan(
     }
 
     if profile.cookie_first {
-        plan.extend(browser_cookie_strategies("Cookie-first", &shared_header_args));
+        plan.extend(browser_cookie_strategies(
+            "Cookie-first",
+            &shared_header_args,
+        ));
     }
 
     plan.push(StrategySpec {
@@ -281,7 +281,10 @@ fn strategy_plan(
     }
 
     if !profile.cookie_first {
-        plan.extend(browser_cookie_strategies("Browser cookies", &shared_header_args));
+        plan.extend(browser_cookie_strategies(
+            "Browser cookies",
+            &shared_header_args,
+        ));
     }
 
     if profile.js_heavy_fallback {
@@ -502,7 +505,10 @@ mod tests {
     fn default_strategy_plan_keeps_browser_session_headers_on_default_strategy() {
         let profile = resolve_profile("media.example.com");
         let mut headers = HashMap::new();
-        headers.insert("Referer".to_string(), "https://media.example.com/watch/alpha".to_string());
+        headers.insert(
+            "Referer".to_string(),
+            "https://media.example.com/watch/alpha".to_string(),
+        );
         headers.insert("Cookie".to_string(), "sid=abc".to_string());
 
         let plan = strategy_plan(profile, Some(&headers));
@@ -512,7 +518,9 @@ mod tests {
             .expect("default strategy missing");
         let header_args = header_arg_pairs(&default.args);
 
-        assert!(header_args.iter().any(|value| value == "Referer: https://media.example.com/watch/alpha"));
+        assert!(header_args
+            .iter()
+            .any(|value| value == "Referer: https://media.example.com/watch/alpha"));
         assert!(header_args.iter().any(|value| value == "Cookie: sid=abc"));
     }
 
@@ -520,7 +528,10 @@ mod tests {
     fn cookie_first_strategy_plan_preserves_session_headers_on_cookie_attempt() {
         let profile = resolve_profile("twitter.com");
         let mut headers = HashMap::new();
-        headers.insert("Referer".to_string(), "https://twitter.com/some/status/1".to_string());
+        headers.insert(
+            "Referer".to_string(),
+            "https://twitter.com/some/status/1".to_string(),
+        );
 
         let plan = strategy_plan(profile, Some(&headers));
         let cookie_first = plan
@@ -529,7 +540,12 @@ mod tests {
             .expect("cookie-first strategy missing");
         let header_args = header_arg_pairs(&cookie_first.args);
 
-        assert!(cookie_first.args.iter().any(|value| value == "--cookies-from-browser"));
-        assert!(header_args.iter().any(|value| value == "Referer: https://twitter.com/some/status/1"));
+        assert!(cookie_first
+            .args
+            .iter()
+            .any(|value| value == "--cookies-from-browser"));
+        assert!(header_args
+            .iter()
+            .any(|value| value == "Referer: https://twitter.com/some/status/1"));
     }
 }

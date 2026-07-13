@@ -15,9 +15,11 @@ import {
   X,
 } from "lucide-react";
 import {
+  browserConnectionPresentation,
   browserSetupInstruction,
   selectBrowserProfile,
   type BrowserIntegrationProfile,
+  type ExtensionIdentityStatus,
 } from "../lib/browser-integration";
 
 interface BrowserIntegrationStatus {
@@ -47,6 +49,11 @@ interface BrowserIntegrationStatus {
   last_seen_runtime_id?: string;
   last_seen_browser?: string;
   last_heartbeat_at_ms?: number;
+  connected_extension?: ExtensionIdentityStatus & {
+    id: string;
+    installation_type: string;
+    browser_channel: string;
+  };
   chrome_runtime_matches_manifest: boolean;
   chromium_runtime_matches_manifest: boolean;
   helium_runtime_matches_manifest: boolean;
@@ -267,6 +274,15 @@ export function ExtensionSetupModal({
     if (!status?.last_seen_runtime_id) {
       return `No extension heartbeat detected yet. Install the web-store extension (${status?.webstore_extension_id || "stable ID"}), open its popup once, then refresh this screen.`;
     }
+    if (status.connected_extension?.kind === "chrome_web_store") {
+      return "The native host verified the official Chrome Web Store extension identity.";
+    }
+    if (status.connected_extension?.kind === "local_unpacked") {
+      return "The native host verified an unpacked extension ID explicitly configured in the browser bridge.";
+    }
+    if (status.connected_extension?.kind === "unsupported") {
+      return "The native host detected an extension ID that is neither the official Web Store identity nor an unpacked ID configured in the browser bridge.";
+    }
     if (
       activeBrowser === "chrome" &&
       status.chrome_manifest_installed &&
@@ -297,6 +313,12 @@ export function ExtensionSetupModal({
         className: "rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium text-gray-300",
       };
     }
+    if (status.connected_extension?.supported) {
+      return {
+        text: "Verified",
+        className: "rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300",
+      };
+    }
     if (
       activeBrowser === "chrome" &&
       status.chrome_manifest_installed &&
@@ -317,15 +339,6 @@ export function ExtensionSetupModal({
         className: "rounded-full bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300",
       };
     }
-    if (
-      (activeBrowser === "chrome" && status.chrome_runtime_matches_manifest) ||
-      (activeBrowser === "edge" && status.edge_runtime_matches_manifest)
-    ) {
-      return {
-        text: "IDs Match",
-        className: "rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300",
-      };
-    }
     return {
       text: "Check IDs",
       className: "rounded-full bg-amber-500/10 px-2 py-1 text-[11px] font-medium text-amber-300",
@@ -337,14 +350,8 @@ export function ExtensionSetupModal({
     return new Date(status.last_heartbeat_at_ms).toLocaleString();
   }, [status?.last_heartbeat_at_ms]);
 
-  const connectionMatchesManifest = !!status?.last_seen_runtime_id && (
-    (activeBrowser === "chrome" && status.chrome_runtime_matches_manifest) ||
-    (activeBrowser === "edge" && status.edge_runtime_matches_manifest)
-  );
-  const isOfficialExtension =
-    connectionMatchesManifest &&
-    status?.last_seen_runtime_id === status?.webstore_extension_id;
-  const isLocalExtension = connectionMatchesManifest && !isOfficialExtension;
+  const connectionSupported = !!status?.last_seen_runtime_id &&
+    status?.connected_extension?.supported === true;
   const anyManifestInstalled = !!status && (
     browserProfiles.some((profile) => profile.manifest_installed) ||
     status.chromium_manifest_installed
@@ -362,87 +369,36 @@ export function ExtensionSetupModal({
         icon: LoaderCircle,
       };
     }
-    if (connectionMatchesManifest) {
-      return isOfficialExtension
-        ? {
-            title: "Connected with the official extension",
-            description: "VelocityDL is ready to receive downloads from your browser.",
-            tone: "success" as const,
-            icon: CheckCircle2,
-          }
-        : {
-            title: "Connected via local extension",
-            description: "Your locally loaded extension is connected and ready to use.",
-            tone: "success" as const,
-            icon: CheckCircle2,
-          };
-    }
-    if (status.last_seen_runtime_id) {
-      const manifestIsUnreadable =
-        (activeBrowser === "chrome" && status.chrome_manifest_installed && !status.chrome_manifest_id_readable) ||
-        (activeBrowser === "edge" && status.edge_manifest_installed && !status.edge_manifest_id_readable);
-      if (!activeBrowser || manifestIsUnreadable) {
-        return {
-          title: "Unknown connection state",
-          description: runtimeMatchLabel,
-          tone: "neutral" as const,
-          icon: Circle,
-        };
-      }
-      return {
-        title: "Extension ID mismatch",
-        description: runtimeMatchLabel,
-        tone: "warning" as const,
-        icon: AlertTriangle,
-      };
-    }
-    if (!status.native_host_path) {
-      return {
-        title: "Native host unavailable",
-        description: "This build cannot find the desktop bridge required by the browser extension.",
-        tone: "warning" as const,
-        icon: AlertTriangle,
-      };
-    }
-    if (!anyBrowserAvailable) {
-      return {
-        title: "Action required",
-        description: "Install a supported Chromium browser to continue setup.",
-        tone: "warning" as const,
-        icon: AlertTriangle,
-      };
-    }
-    if (!anyManifestInstalled) {
-      return {
-        title: "Browser setup incomplete",
-        description: "Install or repair the browser bridge, then open the extension once.",
-        tone: "warning" as const,
-        icon: AlertTriangle,
-      };
-    }
+    const presentation = browserConnectionPresentation({
+      runtimeId: status.last_seen_runtime_id,
+      identity: status.connected_extension,
+      nativeHostAvailable: !!status.native_host_path,
+      anyBrowserAvailable,
+      anyManifestInstalled,
+    });
     return {
-      title: "Waiting for extension connection",
-      description: "Open the extension from your browser toolbar to complete setup.",
-      tone: "neutral" as const,
-      icon: Circle,
+      ...presentation,
+      icon: presentation.tone === "success"
+        ? CheckCircle2
+        : presentation.tone === "warning"
+          ? AlertTriangle
+          : Circle,
     };
   }, [
-    activeBrowser,
     anyBrowserAvailable,
     anyManifestInstalled,
-    connectionMatchesManifest,
-    isOfficialExtension,
-    runtimeMatchLabel,
     status,
   ]);
 
-  const extensionModeLabel = isOfficialExtension
-    ? "Official Web Store"
-    : isLocalExtension
-      ? "Local extension"
-      : status?.last_seen_runtime_id
-        ? "Unknown"
-        : "Not detected";
+  const extensionModeLabel = status
+    ? browserConnectionPresentation({
+        runtimeId: status.last_seen_runtime_id,
+        identity: status.connected_extension,
+        nativeHostAvailable: !!status.native_host_path,
+        anyBrowserAvailable,
+        anyManifestInstalled,
+      }).extensionModeLabel
+    : "Not detected";
 
   const activeManifestLabel = activeBrowserProfile
     ? `${activeBrowserProfile.label} ${activeBrowserProfile.manifest_installed ? "ready" : "incomplete"}`
@@ -597,8 +553,8 @@ export function ExtensionSetupModal({
                     <div className="mt-4 flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-950/55 p-4 sm:flex-row sm:items-center sm:justify-between">
                       <div>
                         <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
-                          {connectionMatchesManifest ? <CheckCircle2 size={15} className="text-emerald-400" aria-hidden="true" /> : <Circle size={15} className="text-zinc-500" aria-hidden="true" />}
-                          {connectionMatchesManifest ? `Connected · ${extensionModeLabel}` : connectionBadge.text}
+                          {connectionSupported ? <CheckCircle2 size={15} className="text-emerald-400" aria-hidden="true" /> : <Circle size={15} className="text-zinc-500" aria-hidden="true" />}
+                          {connectionSupported ? `Connected · ${extensionModeLabel}` : connectionBadge.text}
                         </div>
                         <div className="mt-1 text-[11px] text-zinc-500">Last heartbeat: {heartbeatTimeLabel}</div>
                       </div>
@@ -642,10 +598,10 @@ export function ExtensionSetupModal({
                     </div>
                     <div className="mt-4 grid gap-1 sm:grid-cols-2 lg:grid-cols-1">
                       <ReadinessItem label="Extension" value={status?.last_seen_runtime_id ? "Detected" : "Waiting"} ready={!!status?.last_seen_runtime_id} />
-                      <ReadinessItem label="Extension mode" value={extensionModeLabel} ready={connectionMatchesManifest} neutral={!connectionMatchesManifest} />
+                      <ReadinessItem label="Extension mode" value={extensionModeLabel} ready={connectionSupported} neutral={!connectionSupported} />
                       <ReadinessItem label="Native host" value={status?.native_host_path ? "Available" : "Unavailable"} ready={!!status?.native_host_path} />
                       <ReadinessItem label="Browser manifest" value={activeManifestLabel} ready={anyManifestInstalled} />
-                      <ReadinessItem label="Connection" value={connectionBadge.text} ready={connectionMatchesManifest} neutral={!status?.last_seen_runtime_id} />
+                      <ReadinessItem label="Connection" value={connectionBadge.text} ready={connectionSupported} neutral={!status?.last_seen_runtime_id} />
                       <ReadinessItem label="Heartbeat" value={heartbeatTimeLabel} ready={!!status?.last_heartbeat_at_ms} neutral={!status?.last_heartbeat_at_ms} />
                     </div>
 

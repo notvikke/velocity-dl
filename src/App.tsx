@@ -8,8 +8,9 @@ import { DownloadCard } from "./components/DownloadCard";
 import { DownloadAttemptDialog } from "./components/DownloadAttemptDialog";
 import { WelcomeSetupModal } from "./components/WelcomeSetupModal";
 import { shouldOpenPickerForBrowserCapture } from "./lib/browser-capture-routing";
-import { shouldRevealAppForBrowserHandoff } from "./lib/browser-handoff-ux";
 import { copyAppDiagnosticsToClipboard, installConsoleDiagnostics } from "./lib/diagnostics";
+import { downloadRevealView, selectorForDownloadId } from "./lib/download-reveal";
+import { loadAppVersion } from "./lib/app-version";
 import type { DownloadQualityBadgeInput } from "./lib/download-quality";
 import { shouldAutoRefreshDownload, type DownloadRefreshRuntimeState, isZeroLikeSpeed } from "./lib/download-refresh";
 import { ACTIVE_QUEUE_STATUSES, matchesDownloadTab } from "./lib/download-visibility";
@@ -445,6 +446,7 @@ function App() {
   const [addUrlLaunchSource, setAddUrlLaunchSource] = useState<AddUrlLaunchSource>("manual");
   const [searchTerm, setSearchTerm] = useState("");
   const [developerModeEnabled, setDeveloperModeEnabled] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [showCaptureDebug, setShowCaptureDebug] = useState(false);
   const [captureDebugEntries, setCaptureDebugEntries] = useState<CaptureDebugEntry[]>([]);
   const [maxThreads, setMaxThreads] = useState(DEFAULT_THREAD_COUNT);
@@ -460,6 +462,7 @@ function App() {
   const [deleteBusy, setDeleteBusy] = useState(false);
 
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [highlightedDownloadId, setHighlightedDownloadId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const downloadsRef = useRef<DownloadItem[]>([]);
   const refreshStateRef = useRef<Record<string, DownloadRefreshRuntimeState>>({});
@@ -773,7 +776,7 @@ function App() {
       setInitialHeaders(undefined);
       setInitialUrl(url);
       setInitialAttemptSessionId(undefined);
-      setInitialDownloadContext(undefined);
+      setInitialDownloadContext({ downloadOrigin: "sniff_capture" });
       setAddUrlLaunchSource("media_detected");
       setIsAddUrlOpen(true);
     });
@@ -975,16 +978,6 @@ function App() {
             );
             return;
           }
-          if (
-            shouldRevealAppForBrowserHandoff({
-              source: payload.source,
-              routeClass,
-            })
-          ) {
-            invoke("reveal_main_window").catch((error) => {
-              console.error("Failed to reveal main window for browser handoff", error);
-            });
-          }
           recentAutoCapturesRef.current.set(dedupeKey, now);
           recordCapture(
             routeClass === "auto_start_manifest"
@@ -1108,6 +1101,25 @@ function App() {
         };
       });
     });
+    let revealScrollTimer: number | undefined;
+    let revealHighlightTimer: number | undefined;
+    const unlistenNewDownloadReveal = listen<{ downloadId: string }>("new_download_revealed", (event) => {
+      const view = downloadRevealView(event.payload.downloadId);
+      setActiveTab(view.activeTab);
+      setActiveCategory(view.activeCategory);
+      setSearchTerm(view.searchTerm);
+      setHighlightedDownloadId(view.downloadId);
+      window.clearTimeout(revealScrollTimer);
+      window.clearTimeout(revealHighlightTimer);
+      revealScrollTimer = window.setTimeout(() => {
+        document
+          .querySelector(selectorForDownloadId(view.downloadId))
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 80);
+      revealHighlightTimer = window.setTimeout(() => {
+        setHighlightedDownloadId((current) => current === view.downloadId ? null : current);
+      }, 1800);
+    });
     invoke("set_external_capture_listener_ready").catch(console.error);
 
     return () => {
@@ -1116,8 +1128,21 @@ function App() {
       unlistenProgress.then(f => f());
       unlistenAttempt.then(f => f());
       unlistenExtensionHealth.then(f => f());
+      unlistenNewDownloadReveal.then(f => f());
+      window.clearTimeout(revealScrollTimer);
+      window.clearTimeout(revealHighlightTimer);
     };
   }, [maxThreads]);
+
+  useEffect(() => {
+    let isMounted = true;
+    void loadAppVersion().then((version) => {
+      if (isMounted) setAppVersion(version);
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -1210,6 +1235,9 @@ function App() {
   ) => {
     const sessionId = attemptSessionId || beginAttemptSession(title || "Preparing download", url);
     try {
+      if (downloadContext?.downloadOrigin === "sniff_capture") {
+        console.info("[Deep Sniff] Creating download through the standard add_download command");
+      }
       const newDownload = await invoke<DownloadItem>("add_download", { 
         url, 
         audioUrl,
@@ -1230,6 +1258,9 @@ function App() {
         requestMethod,
         requestBody,
         networkRequestId,
+        revealOnAccept:
+          downloadContext?.downloadOrigin === "browser_takeover" ||
+          downloadContext?.downloadOrigin === "sniff_capture",
       });
       newDownload.category = inferCategory(title || url);
       newDownload.segments = createIdleSegments(maxThreads);
@@ -1825,6 +1856,7 @@ function App() {
                 {...download}
                 segments={download.segments || []}
                 developerModeEnabled={developerModeEnabled}
+                highlighted={download.id === highlightedDownloadId}
                 onCopyDiagnostics={handleCopyDiagnostics}
                 onShowAttemptDetails={handleShowAttemptDetails}
                 onPause={handlePause}
@@ -1868,7 +1900,7 @@ function App() {
               </button>
             </div>
             {extensionStatusMessage && <div className="truncate text-gray-400">{extensionStatusMessage}</div>}
-            <div className="shrink-0">v0.1.0-beta.2</div>
+            {appVersion && <div className="shrink-0">{appVersion}</div>}
           </div>
         </div>
       </div>

@@ -1,9 +1,81 @@
 import { describe, expect, it } from "vitest";
 import {
+  browserConnectionPresentation,
   browserSetupInstruction,
   selectBrowserProfile,
   type BrowserIntegrationProfile,
 } from "./browser-integration";
+
+describe("browserConnectionPresentation", () => {
+  it("accepts the official extension independently of manifest diagnostics", () => {
+    const state = browserConnectionPresentation({
+      runtimeId: "alnagakehjhbfkdianlkmcncefldpmhm",
+      identity: {
+        kind: "chrome_web_store",
+        supported: true,
+        production: true,
+        recommended: true,
+      },
+      nativeHostAvailable: true,
+      anyBrowserAvailable: true,
+      anyManifestInstalled: false,
+    });
+
+    expect(state.title).toBe("Connected with the official extension");
+    expect(state.extensionModeLabel).toBe("Official Web Store");
+    expect(state.tone).toBe("success");
+  });
+
+  it("labels an explicitly supported unpacked identity as local", () => {
+    const state = browserConnectionPresentation({
+      runtimeId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      identity: {
+        kind: "local_unpacked",
+        supported: true,
+        production: false,
+        recommended: false,
+      },
+      nativeHostAvailable: true,
+      anyBrowserAvailable: true,
+      anyManifestInstalled: true,
+    });
+
+    expect(state.title).toBe("Connected via local extension");
+    expect(state.extensionModeLabel).toBe("Local extension");
+  });
+
+  it("warns only when a detected identity is unsupported", () => {
+    const state = browserConnectionPresentation({
+      runtimeId: "cccccccccccccccccccccccccccccccc",
+      identity: {
+        kind: "unsupported",
+        supported: false,
+        production: false,
+        recommended: false,
+      },
+      nativeHostAvailable: true,
+      anyBrowserAvailable: true,
+      anyManifestInstalled: true,
+    });
+
+    expect(state.title).toBe("Extension ID mismatch");
+    expect(state.extensionModeLabel).toBe("Unknown");
+    expect(state.tone).toBe("warning");
+  });
+
+  it("distinguishes a missing host from an extension that has not connected", () => {
+    expect(browserConnectionPresentation({
+      nativeHostAvailable: false,
+      anyBrowserAvailable: true,
+      anyManifestInstalled: false,
+    }).title).toBe("Native host unavailable");
+    expect(browserConnectionPresentation({
+      nativeHostAvailable: true,
+      anyBrowserAvailable: true,
+      anyManifestInstalled: true,
+    }).title).toBe("Waiting for extension connection");
+  });
+});
 
 const profiles: BrowserIntegrationProfile[] = [
   {

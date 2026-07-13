@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::fs;
-use tokio::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -201,7 +201,10 @@ async fn write_app_alive(config_dir: &PathBuf) {
     let _ = fs::write(path, current_time_ms().to_string()).await;
 }
 
-pub async fn write_capture_ack(config_dir: &PathBuf, payload: &CaptureAckPayload) -> Result<(), String> {
+pub async fn write_capture_ack(
+    config_dir: &PathBuf,
+    payload: &CaptureAckPayload,
+) -> Result<(), String> {
     let ack_dir = capture_ack_dir(config_dir);
     if !ack_dir.exists() {
         fs::create_dir_all(&ack_dir)
@@ -210,9 +213,13 @@ pub async fn write_capture_ack(config_dir: &PathBuf, payload: &CaptureAckPayload
     }
     let ack_path = capture_ack_path(config_dir, &payload.request_id);
     let raw = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    fs::write(&ack_path, raw)
-        .await
-        .map_err(|e| format!("Failed to write capture ack '{}': {}", ack_path.display(), e))
+    fs::write(&ack_path, raw).await.map_err(|e| {
+        format!(
+            "Failed to write capture ack '{}': {}",
+            ack_path.display(),
+            e
+        )
+    })
 }
 
 async fn emit_or_queue_capture<R: Runtime>(app: &AppHandle<R>, event: NativeInboxEvent) {
@@ -228,7 +235,9 @@ async fn emit_or_queue_capture<R: Runtime>(app: &AppHandle<R>, event: NativeInbo
     queue.pending.lock().await.push_back(event);
 }
 
-pub async fn mark_external_capture_listener_ready<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+pub async fn mark_external_capture_listener_ready<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
     let queue = app.state::<ExternalCaptureQueueState>();
     *queue.frontend_ready.lock().await = true;
 
@@ -360,7 +369,10 @@ pub async fn start_native_inbox_polling<R: Runtime>(app: AppHandle<R>) {
     app.state::<ExtensionHealthState>()
         .replace(initial_health)
         .await;
-    let inbox_len = fs::metadata(&inbox_path).await.map(|meta| meta.len()).unwrap_or(0);
+    let inbox_len = fs::metadata(&inbox_path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     let mut offset = initial_inbox_offset(load_offset(&cursor_path).await, inbox_len);
     save_offset(&cursor_path, offset).await;
 

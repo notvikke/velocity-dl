@@ -178,10 +178,16 @@ fn header_for_row(cols: &[String]) -> Option<CsvHeader> {
 }
 
 fn csv_value(cols: &[String], idx: Option<usize>) -> Option<String> {
-    idx.and_then(|i| cols.get(i)).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    idx.and_then(|i| cols.get(i))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
-fn row_from_csv_cols(cols: &[String], header: Option<&CsvHeader>, fallback_label: String) -> Result<ProbeRow, String> {
+fn row_from_csv_cols(
+    cols: &[String],
+    header: Option<&CsvHeader>,
+    fallback_label: String,
+) -> Result<ProbeRow, String> {
     if let Some(header) = header {
         let url = csv_value(cols, header.url)
             .ok_or_else(|| "CSV row is missing a url/test_url column".to_string())?;
@@ -397,7 +403,10 @@ fn format_expected(expected: Option<&str>) -> String {
 }
 
 fn print_row(row: &ProbeRow, details: &ClassificationDetails) -> bool {
-    let expected = row.expected_strategy.as_deref().and_then(parse_expected_strategy);
+    let expected = row
+        .expected_strategy
+        .as_deref()
+        .and_then(parse_expected_strategy);
     let expected_label = format_expected(row.expected_strategy.as_deref());
     let actual_label = details.strategy.as_str();
     let host_label = details.host.as_deref().unwrap_or("n/a");
@@ -417,13 +426,7 @@ fn print_row(row: &ProbeRow, details: &ClassificationDetails) -> bool {
 
     println!(
         "{} {} | expected={} | actual={} | host={} | reason={} | url={}",
-        status,
-        row.label,
-        expected_label,
-        actual_label,
-        host_label,
-        details.reason,
-        row.url
+        status, row.label, expected_label, actual_label, host_label, details.reason, row.url
     );
 
     if let Some(note) = &row.note {
@@ -456,7 +459,10 @@ fn main() -> Result<(), String> {
 
         summary.total += 1;
         let details = classify_details(&row.url);
-        *summary.by_strategy.entry(details.strategy.as_str()).or_insert(0) += 1;
+        *summary
+            .by_strategy
+            .entry(details.strategy.as_str())
+            .or_insert(0) += 1;
         if print_row(&row, &details) {
             summary.passed += 1;
         } else {
@@ -473,7 +479,10 @@ fn main() -> Result<(), String> {
     }
 
     if summary.failed > 0 {
-        Err(format!("{} row(s) failed strategy validation", summary.failed))
+        Err(format!(
+            "{} row(s) failed strategy validation",
+            summary.failed
+        ))
     } else {
         Ok(())
     }

@@ -1,5 +1,5 @@
-pub mod downloader;
 pub mod debug;
+pub mod downloader;
 pub mod manager;
 pub mod merger;
 pub mod rate_limiter;

@@ -1,13 +1,16 @@
 use crate::engine::downloader::Downloader;
-use crate::engine::rate_limiter::GlobalSpeedLimiter;
 use crate::engine::merger::{merge_segments, preallocate_file};
+use crate::engine::rate_limiter::GlobalSpeedLimiter;
 use crate::engine::segmenter::{calculate_segments, Segment};
 use crate::engine::settings::AppSettings;
 use crate::engine::sound::{play_error_sound, play_finish_sound};
 use crate::engine::speed::SpeedCalculator;
 use crate::ipc::commands::DownloadItem;
-use crate::protocols::dash::{download_mpd, probe_duration_seconds as probe_dash_duration_seconds, DashProgress};
+use crate::protocols::dash::{
+    download_mpd, probe_duration_seconds as probe_dash_duration_seconds, DashProgress,
+};
 use crate::protocols::hls::{download_m3u8, probe_duration_seconds, HlsProgress};
+use base64::Engine as _;
 use log::info;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -17,7 +20,6 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use base64::Engine as _;
 
 async fn auth_cookie_header<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     let auth_manager = app.try_state::<crate::auth::store::AuthManager>()?;
@@ -134,7 +136,9 @@ impl DownloadManager {
         let speed_limiter = self.speed_limiter.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::download_task(app.clone(), item, cancel_token, speed_limiter).await {
+            if let Err(e) =
+                Self::download_task(app.clone(), item, cancel_token, speed_limiter).await
+            {
                 let _ = app.emit(
                     "download_progress",
                     DownloadProgress {
@@ -269,7 +273,8 @@ impl DownloadManager {
                 }
             } else {
                 let duration_secs =
-                    probe_dash_duration_seconds(&ffmpeg_path, &item.url, item.headers.as_ref()).await;
+                    probe_dash_duration_seconds(&ffmpeg_path, &item.url, item.headers.as_ref())
+                        .await;
                 tokio::select! {
                     res = download_mpd(
                         ffmpeg_path,
@@ -377,12 +382,17 @@ impl DownloadManager {
             item.request_method.as_deref().unwrap_or("GET").as_bytes(),
         )?;
         let request_body = match item.request_body.as_ref() {
-            Some(body) if body.encoding == "utf8" => Some(body.data.clone().unwrap_or_default().into_bytes()),
+            Some(body) if body.encoding == "utf8" => {
+                Some(body.data.clone().unwrap_or_default().into_bytes())
+            }
             Some(body) if body.encoding == "base64" => Some(
                 base64::engine::general_purpose::STANDARD
                     .decode(body.data.as_deref().unwrap_or_default())?,
             ),
-            Some(body) => anyhow::bail!("Unsupported captured request body encoding '{}'", body.encoding),
+            Some(body) => anyhow::bail!(
+                "Unsupported captured request body encoding '{}'",
+                body.encoding
+            ),
             None => None,
         };
 
@@ -400,7 +410,8 @@ impl DownloadManager {
                     request_body.clone(),
                 );
                 if let Some(network_request_id) = item.network_request_id.clone() {
-                    downloader = downloader.with_session_refresh(config_dir.clone(), network_request_id);
+                    downloader =
+                        downloader.with_session_refresh(config_dir.clone(), network_request_id);
                 }
                 let downloader = Arc::new(downloader);
 
@@ -470,7 +481,8 @@ impl DownloadManager {
                     speed_limiter.clone(),
                 );
                 if let Some(network_request_id) = item.network_request_id.clone() {
-                    downloader = downloader.with_session_refresh(config_dir.clone(), network_request_id);
+                    downloader =
+                        downloader.with_session_refresh(config_dir.clone(), network_request_id);
                 }
                 let downloader = Arc::new(downloader);
 
@@ -550,7 +562,10 @@ impl DownloadManager {
             if item.audio_headers.is_none() {
                 audio_headers = video_headers.clone();
             }
-            crate::request_context::add_cookie_to_headermap(&mut audio_headers, auth_cookie.as_deref());
+            crate::request_context::add_cookie_to_headermap(
+                &mut audio_headers,
+                auth_cookie.as_deref(),
+            );
             crate::request_context::ensure_default_runtime_headers(&mut audio_headers);
 
             if total_video_size > 0 {
@@ -658,7 +673,7 @@ impl DownloadManager {
                         state.id += offset;
                     }
                     segment_states.extend(audio_states);
-                    
+
                     let _ = app.emit(
                         "download_progress",
                         DownloadProgress {

@@ -3,7 +3,5 @@
   "description": "VelocityDL Native Messaging Host",
   "path": "__HOST_EXE_PATH__",
   "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://__EDGE_EXTENSION_ID__/"
-  ]
+  "allowed_origins": __ALLOWED_ORIGINS__
 }

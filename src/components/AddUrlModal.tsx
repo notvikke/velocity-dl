@@ -105,6 +105,12 @@ interface AppSettings {
   accept_browser_download_requests?: boolean;
 }
 
+interface SnifferCaptureEvent {
+  url: string;
+  headers?: Record<string, string>;
+  content_type?: string;
+}
+
 export function AddUrlModal({
   isOpen,
   onClose,
@@ -125,6 +131,9 @@ export function AddUrlModal({
   const [metadata, setMetadata] = useState<YtMetadata | null>(null);
   const [selectedTier, setSelectedTier] = useState<QualityTier | null>(null);
   const [capturedHeaders, setCapturedHeaders] = useState<Record<string, string> | undefined>(undefined);
+  const [capturedDownloadContext, setCapturedDownloadContext] = useState<
+    AddUrlModalProps["initialDownloadContext"]
+  >(undefined);
 
   const [isDirectUrl, setIsDirectUrl] = useState(false);
   const [autoStartSniffCapture, setAutoStartSniffCapture] = useState(false);
@@ -264,6 +273,7 @@ export function AddUrlModal({
 
   const handleStartDownload = () => {
     if (!selectedTier && !isDirectUrl) return;
+    const effectiveDownloadContext = capturedDownloadContext || initialDownloadContext;
 
     if (isDirectUrl && !metadata) {
       // Direct URL download without metadata
@@ -282,7 +292,7 @@ export function AddUrlModal({
         undefined,
         sessionId,
         undefined,
-        initialDownloadContext
+        effectiveDownloadContext
       );
       onClose();
       return;
@@ -314,7 +324,7 @@ export function AddUrlModal({
         undefined,
         currentAttemptSessionId || initialAttemptSessionId || undefined,
         qualityMetadata,
-        initialDownloadContext,
+        effectiveDownloadContext,
       );
     } else if (selectedTier.isCombined) {
       // Single combined download
@@ -329,7 +339,7 @@ export function AddUrlModal({
         undefined,
         currentAttemptSessionId || initialAttemptSessionId || undefined,
         qualityMetadata,
-        initialDownloadContext,
+        effectiveDownloadContext,
       );
     } else {
       // Multi-track: video + audio (the key fix!)
@@ -344,7 +354,7 @@ export function AddUrlModal({
         selectedTier.audioFormat?.http_headers || metadata?.http_headers,
         currentAttemptSessionId || initialAttemptSessionId || undefined,
         qualityMetadata,
-        initialDownloadContext,
+        effectiveDownloadContext,
       );
     }
     
@@ -358,12 +368,27 @@ export function AddUrlModal({
   };
 
   useEffect(() => {
-    const unlisten = listen<any>("media_detected", (event) => {
+    const unlisten = listen<SnifferCaptureEvent | string>("media_detected", (event) => {
       if (isSniffing) {
           const capture = event.payload;
           const mediaUrl = typeof capture === 'string' ? capture : capture.url;
           const headers = typeof capture === 'string' ? undefined : capture.headers;
+          const contentType = typeof capture === 'string' ? undefined : capture.content_type;
+          const lowerMediaUrl = mediaUrl.toLowerCase();
+          const isDash = lowerMediaUrl.includes('.mpd') || contentType?.includes('dash');
+          const isHls = lowerMediaUrl.includes('.m3u8') || contentType?.includes('mpegurl');
+          const referrer = headers?.Referer || headers?.referer;
+          const sniffDownloadContext: NonNullable<AddUrlModalProps["initialDownloadContext"]> = {
+            strategyHint: isDash ? "dash_manifest" : isHls ? "hls_manifest" : "direct_file",
+            downloadOrigin: "sniff_capture",
+            browserSource: "tauri-deep-sniff",
+            browserConfidence: isDash || isHls ? "strong_manifest" : "strong_direct",
+            originalUrl: referrer,
+            referrer,
+          };
+          console.info("[Deep Sniff] Capture received by the main download flow");
           setCapturedHeaders(headers);
+          setCapturedDownloadContext(sniffDownloadContext);
           setUrl(mediaUrl);
           setIsDirectUrl(true);
           setIsSniffing(false);
@@ -371,16 +396,27 @@ export function AddUrlModal({
             const effectivePath = path?.trim();
             if (effectivePath) {
               const guessedTitle = mediaUrl.split('/').pop()?.split('?')[0] || "captured_stream.mp4";
-              onAdd(mediaUrl, effectivePath, guessedTitle, undefined, headers, undefined, undefined, undefined, currentAttemptSessionId || initialAttemptSessionId || undefined, undefined, initialDownloadContext);
+              onAdd(mediaUrl, effectivePath, guessedTitle, undefined, headers, undefined, undefined, undefined, currentAttemptSessionId || initialAttemptSessionId || undefined, undefined, sniffDownloadContext);
               onClose();
               return;
             }
           }
-          fetchInfo(mediaUrl, headers, true);
+          fetchInfo(mediaUrl, headers, true, sniffDownloadContext);
       }
     });
     return () => { unlisten.then(f => f()); };
-  }, [autoStartSniffCapture, isSniffing, onAdd, onClose, path]);
+  }, [autoStartSniffCapture, currentAttemptSessionId, initialAttemptSessionId, isSniffing, onAdd, onClose, path]);
+
+  useEffect(() => {
+    const unlisten = listen<string>("sniffer_error", (event) => {
+      if (!isSniffing) return;
+      const message = event.payload || "Deep Sniff could not submit this media URL.";
+      console.error("[Deep Sniff] Native handoff failed:", message);
+      setError(message);
+      setIsSniffing(false);
+    });
+    return () => { unlisten.then(f => f()); };
+  }, [isSniffing]);
 
   useEffect(() => {
     const unlisten = listen<{ window_id: string; captured: boolean }>("sniffer_closed", (event) => {
@@ -405,6 +441,7 @@ export function AddUrlModal({
     if (!url || !url.startsWith('http')) return;
     setIsSniffing(true);
     setError(null);
+    setCapturedDownloadContext(undefined);
     try {
         await invoke("start_sniffing", { url });
     } catch (e: any) {
@@ -419,6 +456,7 @@ export function AddUrlModal({
       setIsSniffing(false);
       setSelectedTier(null);
       setCapturedHeaders(undefined);
+      setCapturedDownloadContext(undefined);
       setCurrentAttemptSessionId(initialAttemptSessionId || null);
       invoke<AppSettings>("get_settings").then(s => {
         if (!path) setPath(s.default_download_path);
@@ -438,7 +476,8 @@ export function AddUrlModal({
   const fetchInfo = async (
     overrideUrl?: string,
     overrideHeaders?: Record<string, string>,
-    fromSniffCapture: boolean = false
+    fromSniffCapture: boolean = false,
+    downloadContextOverride?: AddUrlModalProps["initialDownloadContext"]
   ) => {
     const targetUrl = overrideUrl || url;
     if (!targetUrl || !targetUrl.startsWith('http')) return;
@@ -475,7 +514,7 @@ export function AddUrlModal({
       if (fromSniffCapture && path) {
         const fallbackHeaders = overrideHeaders || capturedHeaders;
         const guessedTitle = targetUrl.split('/').pop()?.split('?')[0] || "captured_stream.mp4";
-        onAdd(targetUrl, path, guessedTitle, undefined, fallbackHeaders, undefined, undefined, undefined, attemptSessionId, undefined, initialDownloadContext);
+        onAdd(targetUrl, path, guessedTitle, undefined, fallbackHeaders, undefined, undefined, undefined, attemptSessionId, undefined, downloadContextOverride || capturedDownloadContext || initialDownloadContext);
         onClose();
       }
     } finally {
