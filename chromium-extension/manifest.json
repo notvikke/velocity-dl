@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VelocityDL Bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwttQltdjNAldPTSnyy3vpwo+wFjYcl1nOcAixhjDP1JvwPAccKRn1B/CXbz4iDe28k6SHJucfmElFVIGJL5nsqQRWNEpa6JLnUZzEB7IglVQVtcmw6dReWG0ZBtw4P0ky7bAPvKqkafPkqbfKmbyFXWkzA64JKXWs11JmcaJyz39jez9teUK+bgmyfo9W85YSJmfUA8dXEeJSi2a9lEZ9dXw/cJs9BwwkSoUFhsTzgAk78H/93ONJTbmBP8LPS75DyzZD4O1RA1NNb7lSn2T01pUbQIdfudOafutM2DyIm5U92wkYGmgWKetVO+PcgZeJ7zJxQYhgdhEhxAL2zfjLwIDAQAB",
   "description": "Send browser downloads to VelocityDL via native messaging.",
   "icons": {

@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
+use super::hls_options::hls_input_args;
+
 const FFMPEG_PROGRESS_STALL_TIMEOUT: Duration = Duration::from_secs(45);
 const STDERR_TAIL_LINES: usize = 24;
 
@@ -54,9 +56,10 @@ pub async fn probe_duration_seconds(
         .arg("-of")
         .arg("default=noprint_wrappers=1:nokey=1");
 
-    if let Some(headers_arg) = crate::request_context::build_ffmpeg_header_blob(headers) {
-        command.arg("-headers").arg(headers_arg);
-    }
+    command.args(hls_input_args(
+        url,
+        crate::request_context::build_ffmpeg_header_blob(headers),
+    ));
 
     let output = command.arg(url).output().await.ok()?;
     if !output.status.success() {
@@ -86,9 +89,10 @@ pub async fn download_m3u8(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if let Some(headers_arg) = crate::request_context::build_ffmpeg_header_blob(headers) {
-        command.arg("-headers").arg(headers_arg);
-    }
+    command.args(hls_input_args(
+        url,
+        crate::request_context::build_ffmpeg_header_blob(headers),
+    ));
 
     let mut child = command
         .arg("-i")
@@ -194,10 +198,7 @@ pub async fn download_m3u8(
                 tail.join(" | ")
             }
         };
-        return Err(anyhow!(
-            "FFmpeg HLS download failed: {}",
-            stderr_snapshot
-        ));
+        return Err(anyhow!("FFmpeg HLS download failed: {}", stderr_snapshot));
     }
 
     Ok(())

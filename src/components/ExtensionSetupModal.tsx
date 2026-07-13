@@ -14,6 +14,11 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
+import {
+  browserSetupInstruction,
+  selectBrowserProfile,
+  type BrowserIntegrationProfile,
+} from "../lib/browser-integration";
 
 interface BrowserIntegrationStatus {
   extension_directory?: string;
@@ -51,6 +56,7 @@ interface BrowserIntegrationStatus {
   helium_manifest_id_readable: boolean;
   edge_manifest_id_readable: boolean;
   docs_url: string;
+  browser_profiles: BrowserIntegrationProfile[];
 }
 
 interface BrowserIntegrationInstallResult {
@@ -119,47 +125,26 @@ export function ExtensionSetupModal({
     window.localStorage.setItem(STORAGE_KEYS.edge, edgeId.trim());
   };
 
-  const openBrowserInstallPage = async (browser: "chrome" | "helium" | "edge") => {
+  const browserLabel = (browser: string) =>
+    status?.browser_profiles.find((profile) => profile.id === browser)?.label || browser;
+
+  const openBrowserInstallPage = async (browser: string) => {
     try {
       await invoke("open_browser_install_page", { browser });
-      setMessage(
-        browser === "chrome"
-          ? "Opened Chrome Web Store page"
-          : browser === "helium"
-            ? "Opened Helium with the Chrome Web Store page"
-            : "Opened Edge with the Chrome Web Store page"
-      );
+      setMessage(`Opened the Chrome Web Store in ${browserLabel(browser)}`);
     } catch (error) {
       console.error(`Failed to open ${browser} install page`, error);
-      setMessage(
-        browser === "chrome"
-          ? "Could not open the Chrome Web Store page in Chrome"
-          : browser === "helium"
-            ? "Could not open the Chrome Web Store page in Helium"
-            : "Could not open the Chrome Web Store page in Edge"
-      );
+      setMessage(`Could not open the Chrome Web Store in ${browserLabel(browser)}`);
     }
   };
 
-  const openBrowserPage = async (browser: "chrome" | "helium" | "edge") => {
+  const openBrowserPage = async (browser: string) => {
     try {
       await invoke("open_browser_extensions_page", { browser });
-      setMessage(
-        browser === "chrome"
-          ? "Opened Chrome extensions page"
-          : browser === "helium"
-            ? "Opened Helium extensions page"
-          : "Opened Edge extensions page"
-      );
+      setMessage(`Opened ${browserLabel(browser)} extensions`);
     } catch (error) {
       console.error(`Failed to open ${browser} extensions page`, error);
-      setMessage(
-        browser === "chrome"
-          ? "Could not open Chrome extensions page"
-          : browser === "helium"
-            ? "Could not open Helium extensions page"
-          : "Could not open Edge extensions page"
-      );
+      setMessage(`Could not open ${browserLabel(browser)} extensions`);
     }
   };
 
@@ -170,7 +155,7 @@ export function ExtensionSetupModal({
     }
     try {
       await invoke("open_folder", { path: status.extension_directory });
-      setMessage("Opened bundled extension folder");
+      setMessage("Opened the app-managed extension folder");
     } catch (error) {
       console.error("Failed to open extension folder", error);
       setMessage("Could not open bundled extension folder");
@@ -254,6 +239,12 @@ export function ExtensionSetupModal({
     }
     return null;
   }, [status?.last_seen_browser]);
+
+  const browserProfiles = status?.browser_profiles || [];
+  const activeBrowserProfile = selectBrowserProfile(
+    browserProfiles,
+    status?.last_seen_browser,
+  );
 
   const chromeManifestHint =
     status?.chrome_registered_manifest_path ||
@@ -355,13 +346,11 @@ export function ExtensionSetupModal({
     status?.last_seen_runtime_id === status?.webstore_extension_id;
   const isLocalExtension = connectionMatchesManifest && !isOfficialExtension;
   const anyManifestInstalled = !!status && (
-    status.chrome_manifest_installed ||
-    status.chromium_manifest_installed ||
-    status.helium_manifest_installed ||
-    status.edge_manifest_installed
+    browserProfiles.some((profile) => profile.manifest_installed) ||
+    status.chromium_manifest_installed
   );
   const anyBrowserAvailable = !!status && (
-    status.chrome_available || status.helium_available || status.edge_available
+    browserProfiles.some((profile) => profile.available)
   );
 
   const masterStatus = useMemo(() => {
@@ -455,13 +444,11 @@ export function ExtensionSetupModal({
         ? "Unknown"
         : "Not detected";
 
-  const activeManifestLabel = activeBrowser === "edge"
-    ? status?.edge_manifest_installed ? "Edge ready" : "Edge incomplete"
-    : activeBrowser === "chrome"
-      ? status?.chrome_manifest_installed ? "Chromium ready" : "Chromium incomplete"
-      : anyManifestInstalled
-        ? "At least one ready"
-        : "Not installed";
+  const activeManifestLabel = activeBrowserProfile
+    ? `${activeBrowserProfile.label} ${activeBrowserProfile.manifest_installed ? "ready" : "incomplete"}`
+    : anyManifestInstalled
+      ? "At least one ready"
+      : "Not installed";
 
   const MasterIcon = masterStatus.icon;
   const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950";
@@ -548,11 +535,11 @@ export function ExtensionSetupModal({
                       </summary>
                       <div className="border-t border-zinc-800 px-3.5 py-4">
                         <p className="text-xs leading-5 text-zinc-400">
-                          Load the bundled extension unpacked, then enter the ID shown by your browser. This remains a fully supported alternative.
+                          Load the same app-managed extension in any Chromium browser. Use this only while the Web Store listing is unavailable or when diagnosing a browser-specific installation.
                         </p>
                         <div className="mt-3 grid gap-3 sm:grid-cols-2">
                           <label className="block">
-                            <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Chrome, Helium, or Chromium ID</span>
+                            <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Chromium-family extension ID</span>
                             <input
                               value={chromeId}
                               onChange={(event) => setChromeId(event.target.value)}
@@ -561,7 +548,7 @@ export function ExtensionSetupModal({
                             />
                           </label>
                           <label className="block">
-                            <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Edge ID</span>
+                            <span className="mb-1.5 block text-[11px] font-medium text-zinc-300">Edge-specific ID (only if different)</span>
                             <input
                               value={edgeId}
                               onChange={(event) => setEdgeId(event.target.value)}
@@ -572,7 +559,7 @@ export function ExtensionSetupModal({
                         </div>
                         <div className="mt-3 flex flex-wrap gap-2">
                           <button type="button" onClick={openExtensionFolder} disabled={!status?.extension_directory} className={secondaryButton}>
-                            <span className="inline-flex items-center gap-2"><FolderOpen size={14} aria-hidden="true" />Open Extension Folder</span>
+                            <span className="inline-flex items-center gap-2"><FolderOpen size={14} aria-hidden="true" />Open App-Managed Extension</span>
                           </button>
                           <button type="button" onClick={installIntegration} disabled={busy || (!chromeId.trim() && !edgeId.trim())} className={secondaryButton}>
                             {busy ? "Working..." : "Apply Manual IDs"}
@@ -587,10 +574,21 @@ export function ExtensionSetupModal({
                     <p className="mt-2 text-xs leading-5 text-zinc-400">
                       Open the Web Store listing in your preferred browser, install the extension, then select its toolbar icon once.
                     </p>
-                    <div className="mt-4 grid gap-2 sm:grid-cols-3">
-                      <BrowserButton label="Open In Chrome" available={!!status?.chrome_available} recommended onClick={() => openBrowserInstallPage("chrome")} focusRing={focusRing} />
-                      <BrowserButton label="Open In Helium" available={!!status?.helium_available} onClick={() => openBrowserInstallPage("helium")} focusRing={focusRing} />
-                      <BrowserButton label="Open In Edge" available={!!status?.edge_available} onClick={() => openBrowserInstallPage("edge")} focusRing={focusRing} />
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                      {browserProfiles.map((profile) => (
+                        <div key={profile.id} className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-2">
+                          <BrowserButton
+                            label={`Open in ${profile.label}`}
+                            available={profile.available}
+                            recommended={profile.id === "chrome"}
+                            onClick={() => openBrowserInstallPage(profile.id)}
+                            focusRing={focusRing}
+                          />
+                          <p className="px-1 pb-1 pt-2 text-[10px] leading-4 text-zinc-500">
+                            {browserSetupInstruction(profile, status?.extension_directory)}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   </section>
 
@@ -654,9 +652,17 @@ export function ExtensionSetupModal({
                     <div className="mt-4 border-t border-zinc-800 pt-4">
                       <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Browser tools</div>
                       <div className="mt-2 flex flex-wrap gap-2">
-                        <button type="button" onClick={() => openBrowserPage("chrome")} disabled={!status?.chrome_available} className={secondaryButton}>Chrome extensions</button>
-                        <button type="button" onClick={() => openBrowserPage("helium")} disabled={!status?.helium_available} className={secondaryButton}>Helium extensions</button>
-                        <button type="button" onClick={() => openBrowserPage("edge")} disabled={!status?.edge_available} className={secondaryButton}>Edge extensions</button>
+                        {browserProfiles.map((profile) => (
+                          <button
+                            key={profile.id}
+                            type="button"
+                            onClick={() => openBrowserPage(profile.id)}
+                            disabled={!profile.available}
+                            className={secondaryButton}
+                          >
+                            {profile.label} extensions
+                          </button>
+                        ))}
                       </div>
                     </div>
                   </section>

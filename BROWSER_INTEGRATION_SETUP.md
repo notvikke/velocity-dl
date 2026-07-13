@@ -1,6 +1,6 @@
 # Browser Integration Setup
 
-VelocityDL now uses the published Chrome Web Store listing as the primary browser-extension path. Chrome, Helium, Chromium forks, and Edge can all use the same stable extension ID:
+VelocityDL uses one published Chrome Web Store extension for every supported Chromium browser. Chrome, Edge, Brave, Vivaldi, Opera, Opera GX, Helium, and Chromium forks all use the same extension files and stable ID:
 
 - `alnagakehjhbfkdianlkmcncefldpmhm`
 - Listing: `https://chromewebstore.google.com/detail/velocitydl-bridge/alnagakehjhbfkdianlkmcncefldpmhm`
@@ -36,6 +36,20 @@ Output path (debug):
 4. Open VelocityDL and use the Browser Setup Assistant to install or repair the native bridge.
 5. Click the extension popup once so it sends a heartbeat to the app.
 
+## Browser-specific setup
+
+| Browser | Extension installation | Native bridge registration | Extensions page |
+| --- | --- | --- | --- |
+| Chrome | Install from the Chrome Web Store | Chrome registration | `chrome://extensions` |
+| Edge | Enable “Allow extensions from other stores,” then use the Chrome Web Store | Edge registration plus Chromium/Chrome fallback | `edge://extensions` |
+| Brave | Install from the Chrome Web Store | Dedicated Brave registration | `brave://extensions` |
+| Vivaldi | Install from the Chrome Web Store | Shared Chrome-compatible registration | `vivaldi://extensions` |
+| Opera / Opera GX | Install from the Chrome Web Store | Shared Chrome-compatible registration | `opera://extensions` |
+| Helium | Install from the Chrome Web Store | Dedicated Helium registration plus generic Chromium fallback | `chrome://extensions` |
+| Other Chromium forks | Install from the Chrome Web Store when supported | Generic Chromium and Chrome-compatible registration | Usually `chrome://extensions` |
+
+There is no browser-specific extension build. Browser differences are handled only by executable detection, the extensions-page URL, and native-messaging registration.
+
 ## Manual script fallback
 If you need to register the native host manually, run:
 
@@ -56,15 +70,24 @@ And registry keys:
 - `HKCU\Software\imput\Helium\NativeMessagingHosts\com.velocitydl.native_host`
 - `HKCU\Software\imput\Helium\NativeMessagingHosts` value `com.velocitydl.native_host`
 - `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.velocitydl.native_host` (if Edge id provided)
+- `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.velocitydl.native_host`
+- Chrome-compatible fallback registration used by Vivaldi, Opera, and Opera GX
 
 Chromium forks can consult both their browser-specific root and the generic Chromium root. If a browser still shows `Access to the specified native messaging host is forbidden`, check that the Chromium and browser-specific entries all point at `%APPDATA%\com.velocitydl.desktop\native-messaging\com.velocitydl.native_host.chrome.json` instead of any older `com.velocitydl.app` path.
 
-## Unpacked development fallback
-If you intentionally want to test an unpacked local extension copy instead of the web-store build:
+## App-managed unpacked fallback
+
+Installed builds stage one extension copy at:
+
+- `%LOCALAPPDATA%\VelocityDL\chromium-extension`
+
+Use this folder while the Web Store listing is unavailable or when diagnosing a browser-specific installation. Do not load the extension from the development checkout, and do not create separate copies for each browser.
+
+To load the fallback:
 
 1. Open `chrome://extensions` (or `edge://extensions`)
 2. Enable Developer mode
-3. Load unpacked: select `chromium-extension`
+3. Load unpacked: select `%LOCALAPPDATA%\VelocityDL\chromium-extension`
 4. Copy the runtime extension ID shown by the browser
 5. In VelocityDL, use the setup assistant's manual fallback section to apply that ID
 

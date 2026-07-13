@@ -10,6 +10,7 @@ import {
 } from "./request-context.js";
 import { MediaCandidateStore } from "./media-observer-core.js";
 import { NativeTransport } from "./native-transport.js";
+import { scorePlayableCandidate } from "./playable-candidate.js";
 
 const NATIVE_HOST = "com.velocitydl.native_host";
 const HEARTBEAT_ALARM = "vdlExtensionHeartbeat";
@@ -348,34 +349,6 @@ function shouldCaptureWebRequest(url, mime) {
   if (isLikelySegmentUrl(url)) return false;
   if (shouldCaptureByUrl(url)) return true;
   return isInterestingMediaMime(mime || "");
-}
-
-function isLikelyJunkPlayableUrl(url) {
-  if (!url || typeof url !== "string") return true;
-  if (
-    /(?:black[_-]?screen|teaser|trailer|promo|preview|sample|thumbnail|thumb|poster|sprite|ad[s]?)/i.test(
-      url
-    )
-  ) {
-    return true;
-  }
-  const shortDuration = /(?:^|[_-])(\d{1,2})s(?:[_\-.]|$)/i.exec(url);
-  if (shortDuration && Number(shortDuration[1]) <= 8) {
-    return true;
-  }
-  return false;
-}
-
-function scorePlayableCandidate(url, mime) {
-  let score = 0;
-  if (isLikelyManifestUrl(url)) score += 140;
-  if (isLikelyDirectMediaUrl(url)) score += 45;
-  if (/^video\//i.test(mime || "")) score += 35;
-  if (/^audio\//i.test(mime || "")) score += 15;
-  if (/(?:master|playlist|manifest|index)\.(?:m3u8|mpd)(?:$|[?#])/i.test(url)) score += 40;
-  if (/\.mp4(?:$|[?#])/i.test(url)) score += 10;
-  if (isLikelyJunkPlayableUrl(url)) score -= 300;
-  return score;
 }
 
 function pruneWebRequestCaptureDedupe(now) {

@@ -223,14 +223,13 @@ impl Downloader {
 
         let status = response.status();
 
-        if self.total_size > 0
-            && requested_range_start > segment.start
-            && status != StatusCode::PARTIAL_CONTENT
-        {
+        if self.total_size > 0 && status != StatusCode::PARTIAL_CONTENT {
             return Err(anyhow!(
-                "Server did not honor range resume for segment {} (status {}).",
+                "Server did not honor byte range {}-{} for segment {} (status {}).",
+                requested_range_start,
+                segment.end,
                 segment_index,
-                status
+                status,
             ));
         }
 
@@ -334,6 +333,50 @@ mod tests {
     fn ranged_segment_downloads_keep_append_resume_behavior() {
         assert!(!should_truncate_segment_output(1024, 0));
         assert!(!should_truncate_segment_output(1024, 1));
+    }
+
+    #[tokio::test]
+    async fn ranged_segment_rejects_server_that_ignores_initial_range() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains("range: bytes=0-1"), "{request}");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfull",
+                )
+                .await
+                .unwrap();
+        });
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "velocitydl-ignored-range-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        let downloader = Downloader::new(
+            format!("http://{addr}/video.mp4"),
+            4,
+            vec![Segment::new(0, 1)],
+            temp_path.clone(),
+            HeaderMap::new(),
+            GlobalSpeedLimiter::new(),
+        );
+
+        let result = downloader.download_segment_once(0).await;
+        server.await.unwrap();
+        let part_path = temp_path.with_file_name(format!(
+            "{}.vdl-part0",
+            temp_path.file_name().unwrap().to_string_lossy()
+        ));
+        let part_exists = tokio::fs::try_exists(&part_path).await.unwrap();
+        let _ = tokio::fs::remove_file(&part_path).await;
+
+        assert!(result.is_err());
+        assert!(!part_exists, "ignored range response must not be written");
     }
 
     #[tokio::test]

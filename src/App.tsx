@@ -12,6 +12,7 @@ import { shouldRevealAppForBrowserHandoff } from "./lib/browser-handoff-ux";
 import { copyAppDiagnosticsToClipboard, installConsoleDiagnostics } from "./lib/diagnostics";
 import type { DownloadQualityBadgeInput } from "./lib/download-quality";
 import { shouldAutoRefreshDownload, type DownloadRefreshRuntimeState, isZeroLikeSpeed } from "./lib/download-refresh";
+import { ACTIVE_QUEUE_STATUSES, matchesDownloadTab } from "./lib/download-visibility";
 import "./styles/tailwind.css";
 
 const appWindow = getCurrentWindow();
@@ -279,7 +280,7 @@ const DIRECT_FILE_EXT_RE =
 const AUTO_CAPTURE_DEDUPE_WINDOW_MS = 90_000;
 const DEFAULT_THREAD_COUNT = 16;
 const REFRESH_RESUME_DELAY_MS = 900;
-const ACTIVE_DOWNLOAD_STATUSES: DownloadStatus[] = ["active", "paused", "processing"];
+const ACTIVE_DOWNLOAD_STATUSES: DownloadStatus[] = ACTIVE_QUEUE_STATUSES;
 const RUNNING_DOWNLOAD_STATUSES: DownloadStatus[] = ["active", "processing"];
 
 const inferCategory = (titleOrUrl: string): DownloadCategory => {
@@ -1541,11 +1542,7 @@ function App() {
     const normalizedSearch = deferredSearchTerm;
 
     return downloads.filter(d => {
-      const matchesTab = activeTab === "active"
-        ? ACTIVE_DOWNLOAD_STATUSES.includes(d.status)
-        : activeTab === "finished"
-        ? d.status === "finished" && isWithinTenDays(d.completed_at)
-        : d.status === activeTab;
+      const matchesTab = matchesDownloadTab(d.status, activeTab, isWithinTenDays(d.completed_at));
       const matchesCategory =
         activeCategory === "all" ||
         (activeCategory === "file" ? isDocumentBucketCategory(d.category) : d.category === activeCategory);

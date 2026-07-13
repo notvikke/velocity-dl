@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.0 - 2026-07-13
+
+Browser compatibility and download reliability release.
+
+- Expanded browser setup and native-messaging support across Chrome, Edge, Helium, Brave, Vivaldi, Opera, Opera GX, and other Chromium-family browsers.
+- Staged one stable app-managed extension copy for installed builds and clarified the unpacked fallback flow.
+- Improved HLS compatibility for disguised media segments, non-persistent manifest hosts, browser request headers, and master-playlist selection.
+- Hardened direct-download probing and ranged transfers against ignored range requests and misleading content lengths.
+- Kept failed downloads visible in the active queue and improved browser integration status guidance.
+- Updated the VelocityDL Bridge extension package to version 0.1.2.
+
 ## 0.1.0-beta.3 - 2026-07-11
 
 Browser capture and extension reliability release.
